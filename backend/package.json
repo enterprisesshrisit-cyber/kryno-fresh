@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "db:migrate": "tsx src/db/migrate.ts",
+    "db:migrate:dist": "node dist/db/migrate.js",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "audit:prod": "npm audit --omit=dev",

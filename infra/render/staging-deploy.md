@@ -9,7 +9,7 @@ Render is acceptable for free-first staging. The free web service can sleep afte
 - Runtime: Node
 - Region: Singapore
 - Root directory: `backend`
-- Build command: `npm ci && npm run build && npm run db:migrate`
+- Build command: `npm ci --include=dev && npm run build`
 - Start command: `npm run start`
 - Health check path: `/api/health`
 
@@ -83,14 +83,25 @@ MAX_SOCIAL_MEDIA_BYTES=20971520
 3. Create a new Blueprint from `render.yaml`, or create a Web Service manually with the settings above.
 4. Add all private environment values.
 5. Deploy.
-6. Open:
+6. Run migrations separately when schema changes:
+
+```powershell
+cd C:\Users\ankit\Downloads\movies\Balti\project\kryno-fresh\backend
+$env:DATABASE_URL="<staging database url>"
+$env:DATABASE_SSL="true"
+$env:DATABASE_SSL_REJECT_UNAUTHORIZED="false"
+npm.cmd run build
+npm.cmd run db:migrate:dist
+```
+
+7. Open:
 
 ```text
 https://kryno-api-staging.onrender.com/api/health
 https://kryno-api-staging.onrender.com/api/ready
 ```
 
-7. Run the staging security check locally against the Render URL.
+8. Run the staging security check locally against the Render URL.
 
 ```powershell
 cd C:\Users\ankit\Downloads\movies\Balti\project\kryno-fresh\backend

@@ -5,7 +5,7 @@ services:
     rootDir: backend
     plan: free
     region: singapore
-    buildCommand: npm ci && npm run build && npm run db:migrate
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm run start
     healthCheckPath: /api/health
     autoDeploy: false
