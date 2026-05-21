@@ -1,0 +1,29 @@
+node_modules
+dist
+
+# secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+!backend/.env.*.example
+mobile-kryno-ui-raw/.env
+mobile-kryno-ui-raw/.env.*
+!mobile-kryno-ui-raw/.env.example
+!mobile-kryno-ui-raw/.env.*.example
+
+# generated runtime files
+*.log
+*.err.log
+*.out.log
+backend/storage/
+mobile-kryno-ui-raw/builds/*.apk
+mobile-kryno-ui-raw/builds/*.aab
+
+# local tooling
+.expo/
+.vercel/
+*.tsbuildinfo

@@ -1,0 +1,110 @@
+services:
+  - type: web
+    name: kryno-api-staging
+    runtime: node
+    rootDir: backend
+    plan: free
+    region: singapore
+    buildCommand: npm ci && npm run build && npm run db:migrate
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    autoDeploy: false
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 8080
+      - key: APP_BASE_URL
+        value: https://kryno-api-staging.onrender.com
+      - key: DATABASE_SSL
+        value: true
+      - key: DATABASE_SSL_REJECT_UNAUTHORIZED
+        value: false
+      - key: JWT_ISSUER
+        value: kryno-auth
+      - key: JWT_AUDIENCE
+        value: kryno-mobile
+      - key: ACCESS_TOKEN_TTL_MINUTES
+        value: 15
+      - key: REFRESH_TOKEN_TTL_DAYS
+        value: 30
+      - key: EMAIL_VERIFICATION_TTL_HOURS
+        value: 24
+      - key: EMAIL_OTP_TTL_MINUTES
+        value: 10
+      - key: RESET_PASSWORD_OTP_TTL_MINUTES
+        value: 10
+      - key: ALLOW_DEV_EMAIL_TOKEN_PREVIEW
+        value: false
+      - key: SMTP_TLS_REJECT_UNAUTHORIZED
+        value: true
+      - key: REDIS_TLS
+        value: true
+      - key: WAF_PROVIDER
+        value: cloudflare
+      - key: MEDIA_STORAGE_DRIVER
+        value: s3
+      - key: R2_REGION
+        value: auto
+      - key: R2_BUCKET
+        value: kryno-staging-media
+      - key: R2_PUBLIC_BASE_URL
+        value: https://pub-0cb7c93c361f4935b749eefc449dd301.r2.dev
+      - key: KRYNO_STUN_URLS
+        value: stun:stun.l.google.com:19302
+      - key: KRYNO_TURN_URLS
+        value: ""
+      - key: KRYNO_TURN_USERNAME
+        value: ""
+      - key: KRYNO_TURN_CREDENTIAL
+        value: ""
+      - key: MAX_ATTACHMENT_BYTES
+        value: 15728640
+      - key: MAX_SOCIAL_MEDIA_BYTES
+        value: 20971520
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: OTP_PEPPER
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_SECURE
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SECURITY_ALERT_EMAIL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: REVENUECAT_WEBHOOK_SECRET
+        sync: false
+      - key: BACKUP_POLICY_URL
+        sync: false
