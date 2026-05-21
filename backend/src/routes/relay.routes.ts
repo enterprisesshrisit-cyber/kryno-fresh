@@ -59,7 +59,7 @@ export async function relayRoutes(app: FastifyInstance) {
       }
     });
 
-    socket.on('message', async (raw) => {
+    socket.on('message', async (raw: Buffer | string | ArrayBuffer | Buffer[]) => {
       try {
         const text = typeof raw === 'string' ? raw : raw instanceof Buffer ? raw.toString('utf8') : String(raw);
         const payload = JSON.parse(text) as RelayAuthMessage | RelayHeartbeatMessage | ClientRelayCommand;
