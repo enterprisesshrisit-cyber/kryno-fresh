@@ -745,7 +745,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            refreshToken: activeSession.refreshToken,
+            refresh_token: activeSession.refreshToken,
             device_id: deviceProfile.deviceId
           })
         });
@@ -1674,7 +1674,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         await fetchWithTimeout(`${apiOrigin}/api/auth/logout`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken: currentSession.refreshToken })
+          body: JSON.stringify({ refresh_token: currentSession.refreshToken })
         }).catch(() => undefined);
       }
     } finally {
