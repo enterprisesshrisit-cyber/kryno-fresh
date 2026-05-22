@@ -623,9 +623,14 @@ export class AuthService {
 
     const verificationCode = await withTransaction(async (client) => createEmailVerificationCode(client, user.id));
 
-    await emailService.sendVerificationEmail(user.email, verificationCode);
+    const verificationEmailSent = await emailService.sendVerificationEmail(user.email, verificationCode);
 
-    return { success: true };
+    return {
+      success: true,
+      verificationEmailSent,
+      verificationCodePreview:
+        env.APP_ENV === 'development' && env.ALLOW_DEV_EMAIL_TOKEN_PREVIEW ? verificationCode : undefined
+    };
   }
 
   async requestPasswordReset(input: RequestPasswordResetInput, meta: RequestMeta) {

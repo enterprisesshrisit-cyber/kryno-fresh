@@ -104,6 +104,8 @@ export default function AuthScreen() {
       setNotice(
         result.verificationCodePreview
           ? `Account created. Development verification code: ${result.verificationCodePreview}`
+          : !result.verificationEmailSent
+            ? 'Account created, but email delivery failed. Please use Resend code after SMTP is fixed.'
           : 'Account created. Check your email for the verification code.'
       );
     } catch (submitError) {
@@ -141,6 +143,8 @@ export default function AuthScreen() {
       setNotice(
         result.verificationCodePreview
           ? `New code sent. Development preview: ${result.verificationCodePreview}`
+          : !result.verificationEmailSent
+            ? 'Verification code was created, but email delivery failed. Please try again after SMTP is fixed.'
           : 'A fresh verification code has been sent.'
       );
     } catch (submitError) {
@@ -161,6 +165,8 @@ export default function AuthScreen() {
       setNotice(
         result.resetCodePreview
           ? `Reset code sent. Development preview: ${result.resetCodePreview}`
+          : !result.resetEmailSent
+            ? 'Reset code was created, but email delivery failed. Please try again after SMTP is fixed.'
           : 'Password reset code sent to your email.'
       );
     } catch (submitError) {

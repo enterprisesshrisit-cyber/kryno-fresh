@@ -278,11 +278,12 @@ type KrynoBackendContextValue = {
   signup: (input: { username: string; email: string; password: string }) => Promise<{
     email: string;
     username: string;
+    verificationEmailSent: boolean;
     verificationCodePreview?: string;
   }>;
   verifyEmail: (email: string, code: string) => Promise<void>;
-  resendVerification: (email: string) => Promise<{ verificationCodePreview?: string }>;
-  requestPasswordReset: (email: string) => Promise<{ resetCodePreview?: string }>;
+  resendVerification: (email: string) => Promise<{ verificationEmailSent: boolean; verificationCodePreview?: string }>;
+  requestPasswordReset: (email: string) => Promise<{ resetEmailSent: boolean; resetCodePreview?: string }>;
   resetPassword: (email: string, code: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshSocial: () => Promise<void>;
@@ -568,6 +569,30 @@ async function parseJsonResponse<T>(response: Response) {
   return json as T;
 }
 
+async function fetchWithTimeout(
+  input: Parameters<typeof fetch>[0],
+  init: Parameters<typeof fetch>[1] = {},
+  timeoutMs = 20_000
+) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: init?.signal ?? controller.signal
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('The server took too long to respond. Please try again.');
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function requireBackendOrigin(origin: string) {
   const normalized = origin.trim().replace(/\/+$/, '');
   if (!normalized) {
@@ -627,13 +652,13 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         headers.set('Authorization', `Bearer ${activeSession.accessToken}`);
       }
 
-      const response = await fetch(`${apiOrigin}/api${path}`, {
+      const response = await fetchWithTimeout(`${apiOrigin}/api${path}`, {
         ...init,
         headers
       });
 
       if (response.status === 401 && allowRefresh && activeSession && deviceProfile) {
-        const refreshResponse = await fetch(`${apiOrigin}/api/auth/refresh`, {
+        const refreshResponse = await fetchWithTimeout(`${apiOrigin}/api/auth/refresh`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1320,7 +1345,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
       try {
         const apiOrigin = requireBackendOrigin(backendOrigin);
-        const response = await fetch(`${apiOrigin}/api/auth/login`, {
+        const response = await fetchWithTimeout(`${apiOrigin}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1360,7 +1385,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
       try {
         const apiOrigin = requireBackendOrigin(backendOrigin);
-        const response = await fetch(`${apiOrigin}/api/auth/signup`, {
+        const response = await fetchWithTimeout(`${apiOrigin}/api/auth/signup`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1377,6 +1402,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         return {
           email: result.email,
           username: result.username,
+          verificationEmailSent: result.verificationEmailSent,
           verificationCodePreview: result.verificationCodePreview
         };
       } catch (signupError) {
@@ -1396,7 +1422,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
       try {
         const apiOrigin = requireBackendOrigin(backendOrigin);
-        const response = await fetch(`${apiOrigin}/api/auth/verify-email`, {
+        const response = await fetchWithTimeout(`${apiOrigin}/api/auth/verify-email`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1423,7 +1449,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
       try {
         const apiOrigin = requireBackendOrigin(backendOrigin);
-        const response = await fetch(`${apiOrigin}/api/auth/resend-verification`, {
+        const response = await fetchWithTimeout(`${apiOrigin}/api/auth/resend-verification`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1433,6 +1459,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
         const result = await parseJsonResponse<ResendVerificationResponse>(response);
         return {
+          verificationEmailSent: result.verificationEmailSent,
           verificationCodePreview: result.verificationCodePreview
         };
       } catch (resendError) {
@@ -1452,7 +1479,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
       try {
         const apiOrigin = requireBackendOrigin(backendOrigin);
-        const response = await fetch(`${apiOrigin}/api/auth/request-password-reset`, {
+        const response = await fetchWithTimeout(`${apiOrigin}/api/auth/request-password-reset`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1462,6 +1489,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
         const result = await parseJsonResponse<PasswordResetRequestResponse>(response);
         return {
+          resetEmailSent: result.resetEmailSent,
           resetCodePreview: result.resetCodePreview
         };
       } catch (requestError) {
@@ -1481,7 +1509,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
       try {
         const apiOrigin = requireBackendOrigin(backendOrigin);
-        const response = await fetch(`${apiOrigin}/api/auth/reset-password`, {
+        const response = await fetchWithTimeout(`${apiOrigin}/api/auth/reset-password`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1508,7 +1536,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     try {
       if (currentSession) {
         const apiOrigin = requireBackendOrigin(backendOrigin);
-        await fetch(`${apiOrigin}/api/auth/logout`, {
+        await fetchWithTimeout(`${apiOrigin}/api/auth/logout`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ refreshToken: currentSession.refreshToken })

@@ -1,5 +1,29 @@
 import nodemailer from 'nodemailer';
+import dns from 'node:dns';
 import { env } from '../config/env.js';
+
+dns.setDefaultResultOrder('ipv4first');
+
+const EMAIL_SEND_TIMEOUT_MS = 12_000;
+
+async function withEmailTimeout<T>(operation: Promise<T>, label: string): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${EMAIL_SEND_TIMEOUT_MS}ms`));
+        }, EMAIL_SEND_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
 
 export class EmailService {
   private readonly transporter =
@@ -8,6 +32,9 @@ export class EmailService {
           host: env.SMTP_HOST,
           port: env.SMTP_PORT,
           secure: env.SMTP_SECURE ?? false,
+          connectionTimeout: 8_000,
+          greetingTimeout: 8_000,
+          socketTimeout: 12_000,
           auth: env.SMTP_USER && env.SMTP_PASS ? { user: env.SMTP_USER, pass: env.SMTP_PASS } : undefined,
           tls: {
             rejectUnauthorized: env.SMTP_TLS_REJECT_UNAUTHORIZED
@@ -26,29 +53,32 @@ export class EmailService {
     }
 
     try {
-      await this.transporter.sendMail({
-        from: env.EMAIL_FROM,
-        to: email,
-        subject: 'Your KRYNO verification code',
-        text: `Your KRYNO verification code is ${code}. It expires in ${env.EMAIL_OTP_TTL_MINUTES} minutes.`,
-        html: `
-          <div style="font-family:Arial,sans-serif;background:#0b0f1a;color:#f4f7ff;padding:24px">
-            <div style="max-width:560px;margin:0 auto;background:rgba(255,255,255,.04);border:1px solid rgba(111,168,255,.25);border-radius:20px;padding:28px">
-              <p style="margin:0 0 8px;color:#78dfff;font-size:12px;letter-spacing:.18em;text-transform:uppercase">KRYNO</p>
-              <h1 style="margin:0 0 12px;font-size:28px;line-height:1.1">Verify your account</h1>
-              <p style="margin:0 0 20px;color:#b6c0df;font-size:15px;line-height:1.6">
-                Enter this one-time verification code in the KRYNO app.
-              </p>
-              <div style="display:inline-block;padding:16px 22px;border-radius:16px;background:#10192b;border:1px solid rgba(111,168,255,.25);font-size:32px;font-weight:700;letter-spacing:.35em;color:#ffffff">
-                ${code}
+      await withEmailTimeout(
+        this.transporter.sendMail({
+          from: env.EMAIL_FROM,
+          to: email,
+          subject: 'Your KRYNO verification code',
+          text: `Your KRYNO verification code is ${code}. It expires in ${env.EMAIL_OTP_TTL_MINUTES} minutes.`,
+          html: `
+            <div style="font-family:Arial,sans-serif;background:#0b0f1a;color:#f4f7ff;padding:24px">
+              <div style="max-width:560px;margin:0 auto;background:rgba(255,255,255,.04);border:1px solid rgba(111,168,255,.25);border-radius:20px;padding:28px">
+                <p style="margin:0 0 8px;color:#78dfff;font-size:12px;letter-spacing:.18em;text-transform:uppercase">KRYNO</p>
+                <h1 style="margin:0 0 12px;font-size:28px;line-height:1.1">Verify your account</h1>
+                <p style="margin:0 0 20px;color:#b6c0df;font-size:15px;line-height:1.6">
+                  Enter this one-time verification code in the KRYNO app.
+                </p>
+                <div style="display:inline-block;padding:16px 22px;border-radius:16px;background:#10192b;border:1px solid rgba(111,168,255,.25);font-size:32px;font-weight:700;letter-spacing:.35em;color:#ffffff">
+                  ${code}
+                </div>
+                <p style="margin:20px 0 0;color:#94a0bf;font-size:13px;line-height:1.6">
+                  This code expires in ${env.EMAIL_OTP_TTL_MINUTES} minutes. If you did not request this, you can ignore this email.
+                </p>
               </div>
-              <p style="margin:20px 0 0;color:#94a0bf;font-size:13px;line-height:1.6">
-                This code expires in ${env.EMAIL_OTP_TTL_MINUTES} minutes. If you did not request this, you can ignore this email.
-              </p>
             </div>
-          </div>
-        `
-      });
+          `
+        }),
+        'Verification email'
+      );
 
       return true;
     } catch (error) {
@@ -65,29 +95,32 @@ export class EmailService {
     }
 
     try {
-      await this.transporter.sendMail({
-        from: env.EMAIL_FROM,
-        to: email,
-        subject: 'Your KRYNO password reset code',
-        text: `Your KRYNO password reset code is ${code}. It expires in ${env.RESET_PASSWORD_OTP_TTL_MINUTES} minutes.`,
-        html: `
-          <div style="font-family:Arial,sans-serif;background:#0b0f1a;color:#f4f7ff;padding:24px">
-            <div style="max-width:560px;margin:0 auto;background:rgba(255,255,255,.04);border:1px solid rgba(111,168,255,.25);border-radius:20px;padding:28px">
-              <p style="margin:0 0 8px;color:#78dfff;font-size:12px;letter-spacing:.18em;text-transform:uppercase">KRYNO</p>
-              <h1 style="margin:0 0 12px;font-size:28px;line-height:1.1">Reset your password</h1>
-              <p style="margin:0 0 20px;color:#b6c0df;font-size:15px;line-height:1.6">
-                Enter this reset code in the KRYNO app and choose a new password.
-              </p>
-              <div style="display:inline-block;padding:16px 22px;border-radius:16px;background:#10192b;border:1px solid rgba(111,168,255,.25);font-size:32px;font-weight:700;letter-spacing:.35em;color:#ffffff">
-                ${code}
+      await withEmailTimeout(
+        this.transporter.sendMail({
+          from: env.EMAIL_FROM,
+          to: email,
+          subject: 'Your KRYNO password reset code',
+          text: `Your KRYNO password reset code is ${code}. It expires in ${env.RESET_PASSWORD_OTP_TTL_MINUTES} minutes.`,
+          html: `
+            <div style="font-family:Arial,sans-serif;background:#0b0f1a;color:#f4f7ff;padding:24px">
+              <div style="max-width:560px;margin:0 auto;background:rgba(255,255,255,.04);border:1px solid rgba(111,168,255,.25);border-radius:20px;padding:28px">
+                <p style="margin:0 0 8px;color:#78dfff;font-size:12px;letter-spacing:.18em;text-transform:uppercase">KRYNO</p>
+                <h1 style="margin:0 0 12px;font-size:28px;line-height:1.1">Reset your password</h1>
+                <p style="margin:0 0 20px;color:#b6c0df;font-size:15px;line-height:1.6">
+                  Enter this reset code in the KRYNO app and choose a new password.
+                </p>
+                <div style="display:inline-block;padding:16px 22px;border-radius:16px;background:#10192b;border:1px solid rgba(111,168,255,.25);font-size:32px;font-weight:700;letter-spacing:.35em;color:#ffffff">
+                  ${code}
+                </div>
+                <p style="margin:20px 0 0;color:#94a0bf;font-size:13px;line-height:1.6">
+                  This code expires in ${env.RESET_PASSWORD_OTP_TTL_MINUTES} minutes. If you did not request this, you can ignore this email.
+                </p>
               </div>
-              <p style="margin:20px 0 0;color:#94a0bf;font-size:13px;line-height:1.6">
-                This code expires in ${env.RESET_PASSWORD_OTP_TTL_MINUTES} minutes. If you did not request this, you can ignore this email.
-              </p>
             </div>
-          </div>
-        `
-      });
+          `
+        }),
+        'Password reset email'
+      );
 
       return true;
     } catch (error) {
@@ -118,31 +151,34 @@ export class EmailService {
     }
 
     try {
-      await this.transporter.sendMail({
-        from: env.EMAIL_FROM,
-        to: email,
-        subject: 'New KRYNO login detected',
-        text: `Hi ${input.username}, we detected a login to your KRYNO account from ${deviceName} at ${occurredAt}. IP: ${ip}. Device: ${userAgent}. If this was not you, reset your password immediately.`,
-        html: `
-          <div style="font-family:Arial,sans-serif;background:#0b0f1a;color:#f4f7ff;padding:24px">
-            <div style="max-width:560px;margin:0 auto;background:rgba(255,255,255,.04);border:1px solid rgba(111,168,255,.25);border-radius:20px;padding:28px">
-              <p style="margin:0 0 8px;color:#78dfff;font-size:12px;letter-spacing:.18em;text-transform:uppercase">KRYNO SECURITY</p>
-              <h1 style="margin:0 0 12px;font-size:28px;line-height:1.1">New login detected</h1>
-              <p style="margin:0 0 18px;color:#b6c0df;font-size:15px;line-height:1.6">
-                Hi ${input.username}, a login was detected from <strong>${deviceName}</strong>.
-              </p>
-              <div style="padding:16px;border-radius:16px;background:#10192b;border:1px solid rgba(111,168,255,.2);color:#dce6ff;font-size:14px;line-height:1.7">
-                <div><strong>Time:</strong> ${occurredAt}</div>
-                <div><strong>IP:</strong> ${ip}</div>
-                <div><strong>Device:</strong> ${userAgent}</div>
+      await withEmailTimeout(
+        this.transporter.sendMail({
+          from: env.EMAIL_FROM,
+          to: email,
+          subject: 'New KRYNO login detected',
+          text: `Hi ${input.username}, we detected a login to your KRYNO account from ${deviceName} at ${occurredAt}. IP: ${ip}. Device: ${userAgent}. If this was not you, reset your password immediately.`,
+          html: `
+            <div style="font-family:Arial,sans-serif;background:#0b0f1a;color:#f4f7ff;padding:24px">
+              <div style="max-width:560px;margin:0 auto;background:rgba(255,255,255,.04);border:1px solid rgba(111,168,255,.25);border-radius:20px;padding:28px">
+                <p style="margin:0 0 8px;color:#78dfff;font-size:12px;letter-spacing:.18em;text-transform:uppercase">KRYNO SECURITY</p>
+                <h1 style="margin:0 0 12px;font-size:28px;line-height:1.1">New login detected</h1>
+                <p style="margin:0 0 18px;color:#b6c0df;font-size:15px;line-height:1.6">
+                  Hi ${input.username}, a login was detected from <strong>${deviceName}</strong>.
+                </p>
+                <div style="padding:16px;border-radius:16px;background:#10192b;border:1px solid rgba(111,168,255,.2);color:#dce6ff;font-size:14px;line-height:1.7">
+                  <div><strong>Time:</strong> ${occurredAt}</div>
+                  <div><strong>IP:</strong> ${ip}</div>
+                  <div><strong>Device:</strong> ${userAgent}</div>
+                </div>
+                <p style="margin:20px 0 0;color:#94a0bf;font-size:13px;line-height:1.6">
+                  If this was not you, reset your password immediately and revoke unknown devices.
+                </p>
               </div>
-              <p style="margin:20px 0 0;color:#94a0bf;font-size:13px;line-height:1.6">
-                If this was not you, reset your password immediately and revoke unknown devices.
-              </p>
             </div>
-          </div>
-        `
-      });
+          `
+        }),
+        'Security alert email'
+      );
 
       return true;
     } catch (error) {
