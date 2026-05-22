@@ -156,6 +156,8 @@ type RelayDirectMessage = {
 type FeedPostModel = typeof FEED_POSTS[number] & {
   likedByMe?: boolean;
   mediaKind?: 'text' | 'image' | 'video';
+  username?: string;
+  commentItems?: SocialPost['comments'];
 };
 
 type StoryModel = typeof STORIES[number];
@@ -321,7 +323,10 @@ type KrynoBackendContextValue = {
   toggleCurrentCallCamera: () => void;
   updateCurrentCallTransport: (input: { phase?: CallStateModel['phase']; status: string; connectedAt?: string }) => void;
   searchUsers: (query: string) => Promise<SearchUser[]>;
+  getSocialProfile: (username: string) => Promise<SocialProfile>;
   togglePostLike: (postId: string) => Promise<void>;
+  commentOnPost: (postId: string, body: string) => Promise<void>;
+  deletePost: (postId: string) => Promise<void>;
   toggleFollow: (username: string, isFollowing: boolean) => Promise<void>;
   saveProfile: (input: { displayName: string; bio: string }) => Promise<void>;
   uploadProfilePhoto: (input: MediaUploadInput) => Promise<void>;
@@ -429,6 +434,32 @@ function resolveMediaUrl(backendOrigin: string, mediaUrl: string | null | undefi
   return `${backendOrigin}${mediaUrl.startsWith('/') ? mediaUrl : `/${mediaUrl}`}`;
 }
 
+function sniffBase64MediaMimeType(value?: string | null) {
+  const normalized = value?.replace(/^data:([^;]+);base64,/, '').replace(/\s+/g, '') ?? '';
+  if (!normalized) {
+    return '';
+  }
+
+  if (normalized.startsWith('/9j/')) return 'image/jpeg';
+  if (normalized.startsWith('iVBORw0KGgo')) return 'image/png';
+  if (normalized.startsWith('R0lGODdh') || normalized.startsWith('R0lGODlh')) return 'image/gif';
+  if (normalized.startsWith('UklGR') && normalized.slice(8, 24).includes('V0VCUA')) return 'image/webp';
+  if (normalized.slice(0, 40).includes('ZnR5cXF0')) return 'video/quicktime';
+  if (normalized.slice(0, 40).includes('ZnR5c')) return 'video/mp4';
+  if (normalized.startsWith('GkXf')) return 'video/webm';
+  return '';
+}
+
+function mediaExtensionForMimeType(mimeType: string) {
+  if (mimeType === 'image/png') return 'png';
+  if (mimeType === 'image/webp') return 'webp';
+  if (mimeType === 'image/gif') return 'gif';
+  if (mimeType === 'video/mp4') return 'mp4';
+  if (mimeType === 'video/quicktime') return 'mov';
+  if (mimeType === 'video/webm') return 'webm';
+  return 'jpg';
+}
+
 function guessMimeType(uri: string, mimeType?: string | null) {
   if (mimeType) {
     return mimeType;
@@ -469,6 +500,12 @@ function guessFileName(uri: string, fileName: string | null | undefined, mimeTyp
                 ? 'webm'
                 : 'jpg';
   return `kryno-media-${Date.now()}.${extension}`;
+}
+
+function ensureFileNameMatchesMimeType(fileName: string, mimeType: string) {
+  const extension = mediaExtensionForMimeType(mimeType);
+  const cleanName = fileName.trim() || `kryno-media-${Date.now()}.${extension}`;
+  return cleanName.replace(/\.(jpe?g|png|webp|gif|mp4|mov|webm)$/i, `.${extension}`);
 }
 
 function formatTimeAgo(value: string) {
@@ -2309,6 +2346,12 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     [storedThreads, upsertConversationSeed, upsertKnownUsers]
   );
 
+  const getSocialProfile = useCallback(
+    async (username: string) =>
+      apiFetch<SocialProfile>(`/social/profile/${encodeURIComponent(username.replace(/^@/, '').trim())}`),
+    [apiFetch]
+  );
+
   const markConversationRead = useCallback((conversationKey: string) => {
     setStoredThreads((current) =>
       current.map((entry) =>
@@ -2342,6 +2385,40 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       );
     },
     [apiFetch, bootstrap]
+  );
+
+  const commentOnPost = useCallback(
+    async (postId: string, body: string) => {
+      const updated = await apiFetch<SocialPost>(`/social/posts/${postId}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ body: body.trim() })
+      });
+
+      setBootstrap((current) =>
+        current
+          ? {
+              ...current,
+              feed: current.feed.map((entry) => (entry.id === postId ? updated : entry))
+            }
+          : current
+      );
+    },
+    [apiFetch]
+  );
+
+  const deletePost = useCallback(
+    async (postId: string) => {
+      await apiFetch<{ success: boolean; postId: string }>(`/social/posts/${postId}`, { method: 'DELETE' });
+      setBootstrap((current) =>
+        current
+          ? {
+              ...current,
+              feed: current.feed.filter((entry) => entry.id !== postId)
+            }
+          : current
+      );
+    },
+    [apiFetch]
   );
 
   const toggleFollow = useCallback(
@@ -2395,8 +2472,9 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       kind: 'avatar' | 'post' | 'story',
       input: MediaUploadInput
     ) => {
-      const mimeType = guessMimeType(input.uri, input.mimeType);
-      const fileName = guessFileName(input.uri, input.fileName, mimeType);
+      const sniffedMimeType = sniffBase64MediaMimeType(input.bytesBase64);
+      const mimeType = sniffedMimeType || guessMimeType(input.uri, input.mimeType);
+      const fileName = ensureFileNameMatchesMimeType(guessFileName(input.uri, input.fileName, mimeType), mimeType);
       const uploadTimeoutMs = 120_000;
       const uploadJsonPayload = async (bytesBase64: string) => {
         const payload = bytesBase64.trim();
@@ -2537,6 +2615,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       const seed = computeHash(username) + index;
       return {
         id: post.id,
+        username,
         user: {
           name: safeText(post.author?.displayName, username),
           handle: `@${username}`,
@@ -2552,7 +2631,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         locked: post.visibility === 'private_circle',
         mood: pickMood(seed),
         likedByMe: Boolean(post.likedByMe),
-        mediaKind: post.mediaKind
+        mediaKind: post.mediaKind,
+        commentItems: Array.isArray(post.comments) ? post.comments : []
       };
     });
   }, [backendOrigin, bootstrap]);
@@ -2834,7 +2914,10 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       toggleCurrentCallCamera,
       updateCurrentCallTransport,
       searchUsers,
+      getSocialProfile,
       togglePostLike,
+      commentOnPost,
+      deletePost,
       toggleFollow,
       saveProfile,
       uploadProfilePhoto,
@@ -2883,7 +2966,10 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       toggleCurrentCallCamera,
       updateCurrentCallTransport,
       searchUsers,
+      getSocialProfile,
       togglePostLike,
+      commentOnPost,
+      deletePost,
       toggleFollow,
       saveProfile,
       uploadProfilePhoto,
