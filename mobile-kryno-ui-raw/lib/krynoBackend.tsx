@@ -344,6 +344,9 @@ const DEFAULT_BACKEND_ORIGIN =
   process.env.EXPO_PUBLIC_KRYNO_BACKEND_URL ||
   process.env.EXPO_PUBLIC_BACKEND_URL ||
   (__DEV__ ? 'http://127.0.0.1:8080' : '');
+const BUILD_LOCKED_BACKEND_ORIGIN = !__DEV__ && DEFAULT_BACKEND_ORIGIN.trim()
+  ? DEFAULT_BACKEND_ORIGIN.trim().replace(/\/+$/, '')
+  : '';
 
 const TIER_SEQUENCE = ['Basic', 'Inner Circle', 'Elite'] as const;
 const MOOD_SEQUENCE = ['chill', 'social', 'focus'] as const;
@@ -380,6 +383,10 @@ function pickMood(seed: number) {
 
 function computeHash(value: string) {
   return value.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+}
+
+function safeText(value: unknown, fallback: string) {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
 function fallbackAvatar(label: string, avatarUrl?: string | null) {
@@ -1114,37 +1121,48 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     const suggestions = Array.isArray(bootstrapResponse.suggestions) ? bootstrapResponse.suggestions : [];
     const stories = Array.isArray(bootstrapResponse.stories) ? bootstrapResponse.stories : [];
 
+    const ownUsername = safeText(bootstrapResponse.me?.username, sessionRef.current?.user.username ?? 'kryno');
     const nextKnownUsers: KnownChatUser[] = [
       {
-        id: bootstrapResponse.me.userId,
-        username: bootstrapResponse.me.username,
-        displayName: bootstrapResponse.me.displayName,
-        avatar: fallbackAvatar(bootstrapResponse.me.username, bootstrapResponse.me.avatarUrl),
-        tier: pickTier(computeHash(bootstrapResponse.me.username)),
-        mood: pickMood(computeHash(bootstrapResponse.me.username)),
+        id: bootstrapResponse.me?.userId ?? sessionRef.current?.user.id,
+        username: ownUsername,
+        displayName: safeText(bootstrapResponse.me?.displayName, ownUsername),
+        avatar: fallbackAvatar(ownUsername, bootstrapResponse.me?.avatarUrl),
+        tier: pickTier(computeHash(ownUsername)),
+        mood: pickMood(computeHash(ownUsername)),
         online: true,
-        handle: `@${bootstrapResponse.me.username}`
+        handle: `@${ownUsername}`
       },
-      ...suggestions.map((entry, index) => ({
-        id: entry.userId,
-        username: entry.username,
-        displayName: entry.displayName,
-        avatar: fallbackAvatar(entry.username, entry.avatarUrl),
-        tier: pickTier(computeHash(entry.username) + index),
-        mood: pickMood(computeHash(entry.username) + index),
-        online: index % 2 === 0,
-        handle: `@${entry.username}`
-      })),
-      ...stories.map((story, index) => ({
-        id: undefined,
-        username: story.author.username,
-        displayName: story.author.displayName,
-        avatar: fallbackAvatar(story.author.username, story.author.avatarUrl),
-        tier: pickTier(computeHash(story.author.username) + index),
-        mood: pickMood(computeHash(story.author.username) + index),
-        online: false,
-        handle: `@${story.author.username}`
-      }))
+      ...suggestions
+        .filter((entry) => !!entry?.username)
+        .map((entry, index) => {
+          const username = safeText(entry.username, `member-${index}`);
+          return {
+            id: entry.userId,
+            username,
+            displayName: safeText(entry.displayName, username),
+            avatar: fallbackAvatar(username, entry.avatarUrl),
+            tier: pickTier(computeHash(username) + index),
+            mood: pickMood(computeHash(username) + index),
+            online: index % 2 === 0,
+            handle: `@${username}`
+          };
+        }),
+      ...stories
+        .filter((story) => !!story?.author?.username)
+        .map((story, index) => {
+          const username = safeText(story.author.username, `story-${index}`);
+          return {
+            id: undefined,
+            username,
+            displayName: safeText(story.author.displayName, username),
+            avatar: fallbackAvatar(username, story.author.avatarUrl),
+            tier: pickTier(computeHash(username) + index),
+            mood: pickMood(computeHash(username) + index),
+            online: false,
+            handle: `@${username}`
+          };
+        })
     ];
 
     upsertKnownUsers(nextKnownUsers);
@@ -1184,7 +1202,10 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           return;
         }
 
-        if (storedOrigin?.trim()) {
+        if (BUILD_LOCKED_BACKEND_ORIGIN) {
+          setBackendOriginState(BUILD_LOCKED_BACKEND_ORIGIN);
+          await AsyncStorage.removeItem(BACKEND_ORIGIN_STORAGE_KEY);
+        } else if (storedOrigin?.trim()) {
           setBackendOriginState(storedOrigin.trim().replace(/\/+$/, ''));
         }
 
@@ -1342,6 +1363,12 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   }, [applyCallMediaKey, backendOrigin, deviceProfile, ingestSignalMessages, initialized, session]);
 
   const setBackendOrigin = useCallback(async (value: string) => {
+    if (BUILD_LOCKED_BACKEND_ORIGIN) {
+      setBackendOriginState(BUILD_LOCKED_BACKEND_ORIGIN);
+      await AsyncStorage.removeItem(BACKEND_ORIGIN_STORAGE_KEY);
+      return;
+    }
+
     const normalized = value.trim().replace(/\/+$/, '');
     setBackendOriginState(normalized);
     await AsyncStorage.setItem(BACKEND_ORIGIN_STORAGE_KEY, normalized);
@@ -2368,30 +2395,32 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   );
 
   const feedPosts = useMemo<FeedPostModel[]>(() => {
-    const source = bootstrap?.feed ?? [];
+    const source = Array.isArray(bootstrap?.feed) ? bootstrap.feed : [];
     if (source.length === 0) {
       return FEED_POSTS;
     }
 
-    return source.map((post, index) => {
-      const seed = computeHash(post.author.username) + index;
+    return source.filter((post) => !!post?.id).map((post, index) => {
+      const username = safeText(post.author?.username, `author-${index}`);
+      const seed = computeHash(username) + index;
+      const fallbackPost = FEED_POSTS[index % FEED_POSTS.length];
       return {
         id: post.id,
         user: {
-          name: post.author.displayName,
-          handle: `@${post.author.username}`,
-          avatar: fallbackAvatar(post.author.username, post.author.avatarUrl),
+          name: safeText(post.author?.displayName, username),
+          handle: `@${username}`,
+          avatar: fallbackAvatar(username, post.author?.avatarUrl),
           tier: pickTier(seed)
         },
-        image: resolveMediaUrl(backendOrigin, post.mediaUrl, FEED_POSTS[index % FEED_POSTS.length].image),
+        image: resolveMediaUrl(backendOrigin, post.mediaUrl, fallbackPost.image),
         caption: post.caption || 'Shared a private Kryno moment.',
         captionKeywords: pickKeywords(post.caption || ''),
         timeAgo: formatTimeAgo(post.createdAt),
-        likes: post.likeCount,
-        comments: post.commentCount,
+        likes: Number(post.likeCount ?? 0),
+        comments: Number(post.commentCount ?? 0),
         locked: post.visibility === 'private_circle',
         mood: pickMood(seed),
-        likedByMe: post.likedByMe
+        likedByMe: Boolean(post.likedByMe)
       };
     });
   }, [backendOrigin, bootstrap]);
@@ -2402,15 +2431,16 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       return ME;
     }
 
-    const ownPostsCount = (bootstrap?.feed ?? []).filter((post) => post.author.username === source.username).length;
-    const seed = computeHash(source.username);
+    const username = safeText(source.username, sessionRef.current?.user.username ?? 'kryno');
+    const ownPostsCount = (Array.isArray(bootstrap?.feed) ? bootstrap.feed : []).filter((post) => post.author?.username === username).length;
+    const seed = computeHash(username);
 
     return {
       ...ME,
-      id: source.userId,
-      name: source.displayName || source.username,
-      handle: `@${source.username}`,
-      avatar: fallbackAvatar(source.username, source.avatarUrl),
+      id: source.userId ?? sessionRef.current?.user.id ?? ME.id,
+      name: safeText(source.displayName, username),
+      handle: `@${username}`,
+      avatar: fallbackAvatar(username, source.avatarUrl),
       bio: source.bio || 'New to Kryno. Building a quieter social identity.',
       bioKeywords: pickKeywords(source.bio || ''),
       tier: pickTier(seed),
@@ -2418,58 +2448,67 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       mood: pickMood(seed),
       stats: {
         posts: ownPostsCount,
-        followers: source.followersCount,
-        following: source.followingCount,
+        followers: Number(source.followersCount ?? 0),
+        following: Number(source.followingCount ?? 0),
         visits: Math.max(48, ownPostsCount * 12)
       }
     };
   }, [bootstrap, profile]);
 
   const stories = useMemo<StoryModel[]>(() => {
-    const liveStories = bootstrap?.stories ?? [];
+    const liveStories = Array.isArray(bootstrap?.stories) ? bootstrap.stories : [];
     if (liveStories.length === 0) {
       return STORIES;
     }
 
     return [
       STORIES[0],
-      ...liveStories.slice(0, 8).map((story, index) => ({
-        id: story.id,
-        label: story.author.displayName.split(/\s+/)[0] || story.author.username,
-        isAdd: false,
-        gradient: STORIES[(index % (STORIES.length - 1)) + 1]?.gradient ?? ['#6366F1', '#8B5CF6'],
-        avatar: fallbackAvatar(story.author.username, story.author.avatarUrl)
-      }))
+      ...liveStories
+        .filter((story) => !!story?.id && !!story?.author?.username)
+        .slice(0, 8)
+        .map((story, index) => {
+          const username = safeText(story.author.username, `story-${index}`);
+          const displayName = safeText(story.author.displayName, username);
+          return {
+            id: story.id,
+            label: displayName.split(/\s+/)[0] || username,
+            isAdd: false,
+            gradient: STORIES[(index % (STORIES.length - 1)) + 1]?.gradient ?? ['#6366F1', '#8B5CF6'],
+            avatar: fallbackAvatar(username, story.author.avatarUrl)
+          };
+        })
     ];
   }, [bootstrap]);
 
   const featuredMembers = useMemo<FeaturedMemberModel[]>(() => {
-    const liveSuggestions = bootstrap?.suggestions ?? [];
+    const liveSuggestions = Array.isArray(bootstrap?.suggestions) ? bootstrap.suggestions : [];
     if (liveSuggestions.length === 0) {
       return FEATURED_MEMBERS;
     }
 
-    return liveSuggestions.map((member, index) => {
-      const seed = computeHash(member.username) + index;
+    return liveSuggestions.filter((member) => !!member?.username).map((member, index) => {
+      const username = safeText(member.username, `member-${index}`);
+      const seed = computeHash(username) + index;
       return {
-        id: member.userId,
-        name: member.displayName,
-        handle: `@${member.username}`,
+        id: member.userId ?? `member-${index}`,
+        name: safeText(member.displayName, username),
+        handle: `@${username}`,
         tier: pickTier(seed),
-        avatar: fallbackAvatar(member.username, member.avatarUrl),
+        avatar: fallbackAvatar(username, member.avatarUrl),
         mood: pickMood(seed),
         online: index % 2 === 0,
-        isFollowing: member.isFollowing
+        isFollowing: Boolean(member.isFollowing)
       };
     });
   }, [bootstrap]);
 
   const discoverPosts = useMemo(() => {
-    if (!bootstrap?.feed?.length) {
+    const feed = Array.isArray(bootstrap?.feed) ? bootstrap.feed : [];
+    if (!feed.length) {
       return DISCOVER_POSTS;
     }
 
-    return bootstrap.feed
+    return feed
       .filter((post) => post.mediaUrl)
       .slice(0, 8)
       .map((post, index) => ({
@@ -2477,12 +2516,12 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         image: resolveMediaUrl(backendOrigin, post.mediaUrl, DISCOVER_POSTS[index % DISCOVER_POSTS.length].image),
         category: DISCOVER_CATEGORIES[(index % (DISCOVER_CATEGORIES.length - 1)) + 1]?.id ?? 'all',
         tall: index % 3 === 0,
-        likes: post.likeCount
+        likes: Number(post.likeCount ?? 0)
       }));
   }, [backendOrigin, bootstrap]);
 
   const profilePosts = useMemo<ProfilePostModel[]>(() => {
-    const ownPosts = (bootstrap?.feed ?? []).filter((post) => post.author.username === currentUser.handle.replace(/^@/, ''));
+    const ownPosts = (Array.isArray(bootstrap?.feed) ? bootstrap.feed : []).filter((post) => post.author?.username === currentUser.handle.replace(/^@/, ''));
     if (ownPosts.length === 0) {
       return PROFILE_POSTS;
     }
@@ -2491,8 +2530,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       id: post.id,
       image: resolveMediaUrl(backendOrigin, post.mediaUrl, PROFILE_POSTS[index % PROFILE_POSTS.length].image),
       locked: post.visibility === 'private_circle',
-      likes: post.likeCount,
-      comments: post.commentCount,
+      likes: Number(post.likeCount ?? 0),
+      comments: Number(post.commentCount ?? 0),
       tall: index % 2 === 0
     }));
   }, [backendOrigin, bootstrap, currentUser.handle]);

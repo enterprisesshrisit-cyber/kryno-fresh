@@ -106,7 +106,7 @@ function PostCard({ post }: { post: typeof PROFILE_POSTS[0] }) {
 
 // ─── MEMBER CARD ───────────────────────────────────────────────────────────────────────────
 function MemberCard({ tier, joinDate }: { tier: TierType; joinDate: string }) {
-  const tierCfg = TIER[tier];
+  const tierCfg = TIER[tier as keyof typeof TIER] ?? TIER.Basic;
   return (
     <LinearGradient
       colors={['rgba(99,102,241,0.18)', 'rgba(6,182,212,0.08)', 'rgba(139,92,246,0.12)']}
@@ -179,17 +179,17 @@ function PrivacyToggle({ label, icon, on, onToggle }: { label: string; icon: any
 export default function ProfileScreen() {
   const { currentUser, profilePosts, stories, uploadProfilePhoto, createStoryFromMedia, createPostFromMedia } = useKrynoBackend();
   const user = currentUser;
-  const [status, setStatus] = useState<StatusType>(user.status);
-  const [mood, setMood] = useState<MoodType>(user.mood);
+  const [status, setStatus] = useState<StatusType>((user.status as StatusType) || 'active');
+  const [mood, setMood] = useState<MoodType>((user.mood as MoodType) || 'chill');
   const [theme, setTheme] = useState('dark_glass');
   const [privacy, setPrivacy] = useState({ viewProfile: true, viewPosts: true, message: false });
   const [bioExpanded, setBioExpanded] = useState(false);
   const [mediaBusy, setMediaBusy] = useState(false);
   const scrollY = useRef(new Animated.Value(0)).current;
 
-  const moodCfg = MOOD[mood];
-  const tierCfg = TIER[user.tier];
-  const statusCfg = STATUS[status];
+  const moodCfg = MOOD[mood as keyof typeof MOOD] ?? MOOD.chill;
+  const tierCfg = TIER[user.tier as keyof typeof TIER] ?? TIER.Basic;
+  const statusCfg = STATUS[status as keyof typeof STATUS] ?? STATUS.active;
   const statusCycle: StatusType[] = ['active', 'focus', 'private'];
 
   const cycleStatus = () => {
@@ -198,8 +198,8 @@ export default function ProfileScreen() {
   };
 
   React.useEffect(() => {
-    setStatus(user.status);
-    setMood(user.mood);
+    setStatus((user.status as StatusType) || 'active');
+    setMood((user.mood as MoodType) || 'chill');
   }, [user.status, user.mood]);
 
   const pickProfilePhoto = useCallback(async () => {

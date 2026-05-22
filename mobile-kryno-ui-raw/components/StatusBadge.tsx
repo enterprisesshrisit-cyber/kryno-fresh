@@ -16,7 +16,7 @@ interface Props {
 }
 
 export default function StatusBadge({ status, onPress }: Props) {
-  const config = STATUS_CONFIG[status];
+  const config = STATUS_CONFIG[status] ?? STATUS_CONFIG.active;
   return (
     <TouchableOpacity
       onPress={onPress}

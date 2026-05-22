@@ -32,6 +32,7 @@ export class EmailService {
           host: env.SMTP_HOST,
           port: env.SMTP_PORT,
           secure: env.SMTP_SECURE ?? false,
+          family: 4,
           connectionTimeout: 8_000,
           greetingTimeout: 8_000,
           socketTimeout: 12_000,

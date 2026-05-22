@@ -35,8 +35,8 @@ function ProfilePreviewModal({ user, visible, onClose }: { user: any; visible: b
   }, [visible]);
 
   if (!user) return null;
-  const tierCfg = TIER[user.tier as keyof typeof TIER];
-  const moodCfg = MOOD[user.mood as keyof typeof MOOD];
+  const tierCfg = TIER[user.tier as keyof typeof TIER] ?? TIER.Basic;
+  const moodCfg = MOOD[user.mood as keyof typeof MOOD] ?? MOOD.chill;
 
   return (
     <Modal transparent visible={visible} onRequestClose={onClose} animationType="none">
@@ -103,8 +103,8 @@ function ProfilePreviewModal({ user, visible, onClose }: { user: any; visible: b
 // ─── CONVERSATION ROW ───────────────────────────────────────────────────────────────
 function ConversationRow({ convo, onAvatarPress, onPress }: { convo: typeof CONVERSATIONS[0]; onAvatarPress: () => void; onPress: () => void }) {
   const scale = useRef(new Animated.Value(1)).current;
-  const tierCfg = TIER[convo.user.tier as keyof typeof TIER];
-  const moodCfg = MOOD[convo.user.mood as keyof typeof MOOD];
+  const tierCfg = TIER[convo.user.tier as keyof typeof TIER] ?? TIER.Basic;
+  const moodCfg = MOOD[convo.user.mood as keyof typeof MOOD] ?? MOOD.chill;
 
   return (
     <TouchableOpacity

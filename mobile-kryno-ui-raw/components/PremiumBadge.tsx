@@ -5,7 +5,7 @@ import { COLORS, FONTS, RADIUS, TIER } from '../lib/theme';
 import type { TierType } from '../lib/theme';
 
 export default function PremiumBadge({ tier }: { tier: TierType }) {
-  const cfg = TIER[tier];
+  const cfg = TIER[tier as keyof typeof TIER] ?? TIER.Basic;
   return (
     <LinearGradient colors={cfg.colors as any} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.badge}>
       <Text style={styles.icon}>{cfg.icon}</Text>

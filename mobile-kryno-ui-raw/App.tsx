@@ -402,11 +402,6 @@ function AppShell() {
     <View style={appStyles.appSurface}>
       <MainTabs />
       <CallOverlay />
-      {error ? (
-        <View style={appStyles.syncNotice} pointerEvents="none">
-          <Text style={appStyles.syncNoticeText} numberOfLines={2}>{error}</Text>
-        </View>
-      ) : null}
     </View>
   );
 }

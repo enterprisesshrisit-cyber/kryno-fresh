@@ -85,8 +85,8 @@ function MemberChip({
   onToggleFollow: (member: typeof FEATURED_MEMBERS[0] & { isFollowing?: boolean }) => void;
 }) {
   const [following, setFollowing] = useState(!!member.isFollowing);
-  const moodCfg = MOOD[member.mood];
-  const tierCfg = TIER[member.tier];
+  const moodCfg = MOOD[member.mood as keyof typeof MOOD] ?? MOOD.chill;
+  const tierCfg = TIER[member.tier as keyof typeof TIER] ?? TIER.Basic;
 
   React.useEffect(() => {
     setFollowing(!!member.isFollowing);

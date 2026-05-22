@@ -18,8 +18,12 @@ const { width } = Dimensions.get('window');
 // ─── STORY BUBBLE ───────────────────────────────────────────────────────
 function StoryBubble({ story, onAddStory, disabled }: { story: any; onAddStory: () => void; disabled?: boolean }) {
   const scale = useRef(new Animated.Value(1)).current;
+  const storyGradient = Array.isArray(story?.gradient) && story.gradient.length >= 2
+    ? story.gradient
+    : ['#6366F1', '#8B5CF6'];
+  const storyLabel = typeof story?.label === 'string' && story.label.trim() ? story.label : 'Story';
   const press = () => {
-    if (story.isAdd) {
+    if (story?.isAdd) {
       onAddStory();
       return;
     }
@@ -34,21 +38,21 @@ function StoryBubble({ story, onAddStory, disabled }: { story: any; onAddStory: 
     <TouchableOpacity onPress={press} activeOpacity={1} style={styles.storyWrap} disabled={disabled}>
       <Animated.View style={{ transform: [{ scale }] }}>
         <LinearGradient
-          colors={story.gradient}
+          colors={storyGradient as any}
           start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
           style={styles.storyRing}
         >
           <View style={styles.storyInner}>
-            {story.isAdd ? (
+            {story?.isAdd ? (
               <LinearGradient colors={['#6366F1', '#8B5CF6']} style={styles.storyAdd}>
                 <Ionicons name="add" size={20} color="white" />
               </LinearGradient>
             ) : (
-              <Image source={{ uri: story.avatar }} style={StyleSheet.absoluteFill} contentFit="cover" />
+              <Image source={{ uri: story?.avatar }} style={StyleSheet.absoluteFill} contentFit="cover" />
             )}
           </View>
         </LinearGradient>
-        <Text style={styles.storyLabel}>{story.label}</Text>
+        <Text style={styles.storyLabel}>{storyLabel}</Text>
       </Animated.View>
     </TouchableOpacity>
   );
@@ -69,8 +73,8 @@ function FeedCard({
   const [showActions, setShowActions] = useState(false);
   const likeScale = useRef(new Animated.Value(1)).current;
   const cardScale = useRef(new Animated.Value(1)).current;
-  const moodCfg = MOOD[post.mood];
-  const tierCfg = TIER[post.user.tier];
+  const moodCfg = MOOD[post.mood as keyof typeof MOOD] ?? MOOD.chill;
+  const tierCfg = TIER[post.user.tier as keyof typeof TIER] ?? TIER.Basic;
 
   React.useEffect(() => {
     setLiked(!!post.likedByMe);
