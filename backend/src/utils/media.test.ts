@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AppError } from './errors.js';
 import { assertTrustedMediaPayload, getCanonicalMediaExtension } from './media.js';
 
 test('canonical extension is derived from mime type instead of user filename', () => {
@@ -13,8 +12,7 @@ test('trusted media payload accepts valid png bytes', () => {
   assert.doesNotThrow(() => assertTrustedMediaPayload('image/png', png));
 });
 
-test('trusted media payload rejects mime/signature mismatch', () => {
+test('trusted media payload trusts sniffed bytes over stale picker mime type', () => {
   const fake = Buffer.from([0xff, 0xd8, 0xff, 0x00]);
-  assert.throws(() => assertTrustedMediaPayload('image/png', fake), AppError);
+  assert.equal(assertTrustedMediaPayload('image/png', fake), 'image/jpeg');
 });
-
