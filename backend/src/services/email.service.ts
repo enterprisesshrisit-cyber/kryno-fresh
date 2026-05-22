@@ -1,11 +1,10 @@
 import nodemailer from 'nodemailer';
 import dns from 'node:dns';
-import { resolve4 } from 'node:dns/promises';
 import { env } from '../config/env.js';
 
 dns.setDefaultResultOrder('ipv4first');
 
-const EMAIL_SEND_TIMEOUT_MS = 12_000;
+const EMAIL_SEND_TIMEOUT_MS = 45_000;
 
 async function withEmailTimeout<T>(operation: Promise<T>, label: string): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
@@ -35,24 +34,22 @@ export class EmailService {
     }
 
     if (!this.transporterPromise) {
-      this.transporterPromise = resolve4(env.SMTP_HOST)
-        .then((addresses) => addresses[0] ?? env.SMTP_HOST)
-        .catch(() => env.SMTP_HOST)
-        .then((smtpHost) =>
-          nodemailer.createTransport({
-            host: smtpHost,
-            port: env.SMTP_PORT,
-            secure: env.SMTP_SECURE ?? false,
-            connectionTimeout: 8_000,
-            greetingTimeout: 8_000,
-            socketTimeout: 12_000,
-            auth: env.SMTP_USER && env.SMTP_PASS ? { user: env.SMTP_USER, pass: env.SMTP_PASS } : undefined,
-            tls: {
-              servername: env.SMTP_HOST,
-              rejectUnauthorized: env.SMTP_TLS_REJECT_UNAUTHORIZED
-            }
-          })
-        );
+      this.transporterPromise = Promise.resolve(
+        nodemailer.createTransport({
+          host: env.SMTP_HOST,
+          port: env.SMTP_PORT,
+          secure: env.SMTP_SECURE ?? false,
+          connectionTimeout: 15_000,
+          greetingTimeout: 15_000,
+          socketTimeout: 30_000,
+          dnsTimeout: 10_000,
+          auth: env.SMTP_USER && env.SMTP_PASS ? { user: env.SMTP_USER, pass: env.SMTP_PASS } : undefined,
+          tls: {
+            servername: env.SMTP_HOST,
+            rejectUnauthorized: env.SMTP_TLS_REJECT_UNAUTHORIZED
+          }
+        })
+      );
     }
 
     return this.transporterPromise;
