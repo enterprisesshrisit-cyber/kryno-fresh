@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import type pg from 'pg';
 import { env } from '../config/env.js';
 import { pool, withTransaction } from '../db/pool.js';
 import { AppError } from '../utils/errors.js';
@@ -81,6 +82,8 @@ type StoryRow = {
   view_count: number;
 };
 
+type QueryRunner = typeof pool | pg.PoolClient;
+
 function sanitizePublicText(value: string, maxLength: number) {
   return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+/g, '').trim().slice(0, maxLength);
 }
@@ -126,8 +129,8 @@ export class SocialService {
     );
   }
 
-  private async fetchProfile(viewerUserId: string, targetUserId: string) {
-    const result = await pool.query<ProfileRow>(
+  private async fetchProfile(viewerUserId: string, targetUserId: string, queryRunner: QueryRunner = pool) {
+    const result = await queryRunner.query<ProfileRow>(
       `
         select
           u.id as user_id,
@@ -597,7 +600,7 @@ export class SocialService {
         [userId, nextDisplayName ?? null, nextBio ?? null, input.avatarMediaId ?? null]
       );
 
-      return this.fetchProfile(userId, userId);
+      return this.fetchProfile(userId, userId, client);
     });
   }
 
