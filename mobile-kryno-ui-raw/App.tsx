@@ -13,6 +13,7 @@ import DiscoverScreen from './screens/DiscoverScreen';
 import MessagesScreen from './screens/MessagesScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
+import PublicProfileScreen from './screens/PublicProfileScreen';
 import AuthScreen from './screens/AuthScreen';
 import { COLORS, FONTS } from './lib/theme';
 import { KrynoBackendProvider, useKrynoBackend } from './lib/krynoBackend';
@@ -173,7 +174,10 @@ function AppShell() {
 
   return (
     <View style={appStyles.appSurface}>
-      <MainTabs />
+      <Stack.Navigator screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="MainTabs" component={MainTabs} />
+        <Stack.Screen name="PublicProfile" component={PublicProfileScreen} />
+      </Stack.Navigator>
     </View>
   );
 }
