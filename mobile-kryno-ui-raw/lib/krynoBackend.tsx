@@ -361,7 +361,7 @@ const DEFAULT_BACKEND_ORIGIN =
   process.env.EXPO_PUBLIC_KRYNO_API_URL ||
   process.env.EXPO_PUBLIC_KRYNO_BACKEND_URL ||
   process.env.EXPO_PUBLIC_BACKEND_URL ||
-  (__DEV__ ? 'http://127.0.0.1:8080' : '');
+  (__DEV__ ? 'http://127.0.0.1:8080' : 'https://kryno-api-staging.onrender.com');
 const BUILD_LOCKED_BACKEND_ORIGIN = !__DEV__ && DEFAULT_BACKEND_ORIGIN.trim()
   ? DEFAULT_BACKEND_ORIGIN.trim().replace(/\/+$/, '')
   : '';
