@@ -28,12 +28,43 @@ const verifyEmailSchema = z.object({
 });
 
 const refreshSchema = z.object({
-  refresh_token: z.string().min(32),
+  refresh_token: z.string().min(32).optional(),
+  refreshToken: z.string().min(32).optional(),
   device_id: z.string().min(8).max(128)
+}).transform((body, ctx) => {
+  const refreshToken = body.refresh_token ?? body.refreshToken;
+  if (!refreshToken) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['refresh_token'],
+      message: 'Refresh token is required.'
+    });
+    return z.NEVER;
+  }
+
+  return {
+    refresh_token: refreshToken,
+    device_id: body.device_id
+  };
 });
 
 const logoutSchema = z.object({
-  refresh_token: z.string().min(32)
+  refresh_token: z.string().min(32).optional(),
+  refreshToken: z.string().min(32).optional()
+}).transform((body, ctx) => {
+  const refreshToken = body.refresh_token ?? body.refreshToken;
+  if (!refreshToken) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['refresh_token'],
+      message: 'Refresh token is required.'
+    });
+    return z.NEVER;
+  }
+
+  return {
+    refresh_token: refreshToken
+  };
 });
 
 const resendVerificationSchema = z.object({
