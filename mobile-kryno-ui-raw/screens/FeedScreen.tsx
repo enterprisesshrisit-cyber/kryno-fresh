@@ -1,8 +1,10 @@
 import React, { useState, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  Animated, Dimensions, StatusBar, Alert,
+  Animated, Dimensions, StatusBar, Alert, Modal, TextInput,
+  KeyboardAvoidingView, Platform, Share,
 } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
@@ -16,6 +18,7 @@ const { width } = Dimensions.get('window');
 
 type FeedCardPost = {
   id: string;
+  username?: string;
   user: {
     name: string;
     handle: string;
@@ -32,7 +35,35 @@ type FeedCardPost = {
   mood: MoodType;
   likedByMe?: boolean;
   mediaKind?: 'text' | 'image' | 'video';
+  commentItems?: Array<{
+    id: string;
+    body: string;
+    createdAt: string;
+    username: string;
+    displayName: string;
+  }>;
 };
+
+function normalizeUsername(value?: string) {
+  return (value ?? '').replace(/^@/, '').trim();
+}
+
+function formatCommentTime(value?: string) {
+  if (!value) {
+    return 'now';
+  }
+
+  const createdAt = new Date(value);
+  if (Number.isNaN(createdAt.getTime())) {
+    return 'now';
+  }
+
+  const minutes = Math.max(1, Math.floor((Date.now() - createdAt.getTime()) / 60000));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
 
 // ─── STORY BUBBLE ───────────────────────────────────────────────────────
 function StoryBubble({ story, onAddStory, disabled }: { story: any; onAddStory: () => void; disabled?: boolean }) {
@@ -82,10 +113,18 @@ function FeedCard({
   post,
   focusMode,
   onToggleLike,
+  onOpenProfile,
+  onOpenComments,
+  onOpenMenu,
+  onSharePost,
 }: {
   post: FeedCardPost;
   focusMode: boolean;
   onToggleLike: (postId: string) => void;
+  onOpenProfile: (username: string) => void;
+  onOpenComments: (post: FeedCardPost) => void;
+  onOpenMenu: (post: FeedCardPost) => void;
+  onSharePost: (post: FeedCardPost) => void;
 }) {
   const [liked, setLiked] = useState(!!post.likedByMe);
   const [likes, setLikes] = useState(post.likes);
@@ -125,7 +164,11 @@ function FeedCard({
     <Animated.View style={[styles.feedCard, { transform: [{ scale: cardScale }] }]}>
       {/* User Header */}
       <View style={styles.cardHeader}>
-        <View style={styles.cardUser}>
+        <TouchableOpacity
+          style={styles.cardUser}
+          onPress={() => onOpenProfile(post.username || post.user.handle)}
+          activeOpacity={0.8}
+        >
           <View style={styles.cardAvatarWrap}>
             <LinearGradient colors={tierCfg.colors as any} style={styles.cardAvatarRing}>
               <Image source={{ uri: post.user.avatar }} style={styles.cardAvatar} contentFit="cover" />
@@ -141,8 +184,8 @@ function FeedCard({
             </View>
             <Text style={styles.cardHandle}>{post.user.handle} · {post.timeAgo}</Text>
           </View>
-        </View>
-        <TouchableOpacity style={styles.cardMore}>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.cardMore} onPress={() => onOpenMenu(post)} activeOpacity={0.8}>
           <Ionicons name="ellipsis-horizontal" size={18} color={COLORS.textMuted} />
         </TouchableOpacity>
       </View>
@@ -215,12 +258,12 @@ function FeedCard({
             </Animated.View>
             {!post.locked && <Text style={[styles.actionCount, liked && { color: COLORS.pink }]}>{likes}</Text>}
           </TouchableOpacity>
-          <TouchableOpacity style={styles.actionBtn} activeOpacity={0.8}>
+          <TouchableOpacity style={styles.actionBtn} activeOpacity={0.8} onPress={() => onOpenComments(post)}>
             <Ionicons name="chatbubble-outline" size={19} color={COLORS.textMuted} />
             {!post.locked && <Text style={styles.actionCount}>{post.comments}</Text>}
           </TouchableOpacity>
         </View>
-        <TouchableOpacity style={styles.actionBtn} activeOpacity={0.8}>
+        <TouchableOpacity style={styles.actionBtn} activeOpacity={0.8} onPress={() => onSharePost(post)}>
           <Ionicons name="paper-plane-outline" size={19} color={COLORS.textMuted} />
         </TouchableOpacity>
       </Animated.View>
@@ -230,10 +273,27 @@ function FeedCard({
 
 // ─── MAIN SCREEN ───────────────────────────────────────────────────────────────
 export default function FeedScreen() {
-  const { feedPosts, refreshSocial, refreshing, stories, togglePostLike, createStoryFromMedia, createPostFromMedia } = useKrynoBackend();
+  const {
+    feedPosts,
+    refreshSocial,
+    refreshing,
+    stories,
+    currentUser,
+    togglePostLike,
+    commentOnPost,
+    deletePost,
+    createStoryFromMedia,
+    createPostFromMedia
+  } = useKrynoBackend();
+  const navigation = useNavigation<any>();
   const [focusMode, setFocusMode] = useState(false);
   const [storyBusy, setStoryBusy] = useState(false);
   const [postBusy, setPostBusy] = useState(false);
+  const [commentsPost, setCommentsPost] = useState<FeedCardPost | null>(null);
+  const [commentText, setCommentText] = useState('');
+  const [commentBusy, setCommentBusy] = useState(false);
+  const [menuPost, setMenuPost] = useState<FeedCardPost | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const scrollY = useRef(new Animated.Value(0)).current;
 
   const headerOpacity = scrollY.interpolate({ inputRange: [0, 60], outputRange: [1, 0], extrapolate: 'clamp' });
@@ -242,6 +302,86 @@ export default function FeedScreen() {
   const onRefresh = useCallback(() => {
     void refreshSocial();
   }, [refreshSocial]);
+
+  const openProfile = useCallback(
+    (value: string) => {
+      const username = normalizeUsername(value);
+      if (username) {
+        navigation.navigate('PublicProfile', { username });
+      }
+    },
+    [navigation]
+  );
+
+  const openComments = useCallback((post: FeedCardPost) => {
+    setCommentsPost(post);
+    setCommentText('');
+  }, []);
+
+  const sharePost = useCallback(async (post: FeedCardPost) => {
+    const caption = post.caption?.trim() || 'Shared a Kryno post.';
+    await Share.share({
+      message: `${post.user.name} on KRYNO: ${caption}`
+    });
+  }, []);
+
+  const submitComment = useCallback(async () => {
+    const body = commentText.trim();
+    if (!commentsPost || !body || commentBusy) {
+      return;
+    }
+
+    try {
+      setCommentBusy(true);
+      await commentOnPost(commentsPost.id, body);
+      const now = new Date().toISOString();
+      setCommentsPost((current) =>
+        current
+          ? {
+              ...current,
+              comments: current.comments + 1,
+              commentItems: [
+                ...(current.commentItems ?? []),
+                {
+                  id: `local-${Date.now()}`,
+                  body,
+                  createdAt: now,
+                  username: normalizeUsername(currentUser.handle),
+                  displayName: currentUser.name
+                }
+              ]
+            }
+          : current
+      );
+      setCommentText('');
+    } catch (error) {
+      Alert.alert('Comment failed', error instanceof Error ? error.message : 'Comment could not be added.');
+    } finally {
+      setCommentBusy(false);
+    }
+  }, [commentBusy, commentOnPost, commentText, commentsPost, currentUser.handle, currentUser.name]);
+
+  const closeMenu = useCallback(() => {
+    if (!deleteBusy) {
+      setMenuPost(null);
+    }
+  }, [deleteBusy]);
+
+  const handleDeletePost = useCallback(async () => {
+    if (!menuPost || deleteBusy) {
+      return;
+    }
+
+    try {
+      setDeleteBusy(true);
+      await deletePost(menuPost.id);
+      setMenuPost(null);
+    } catch (error) {
+      Alert.alert('Delete failed', error instanceof Error ? error.message : 'Post could not be deleted.');
+    } finally {
+      setDeleteBusy(false);
+    }
+  }, [deleteBusy, deletePost, menuPost]);
 
   const addStory = useCallback(async () => {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -362,6 +502,12 @@ export default function FeedScreen() {
     </View>
   );
 
+  const menuPostIsMine =
+    !!menuPost &&
+    normalizeUsername(menuPost.username || menuPost.user.handle).toLowerCase() ===
+      normalizeUsername(currentUser.handle).toLowerCase();
+  const visibleComments = commentsPost?.commentItems ?? [];
+
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
@@ -379,6 +525,12 @@ export default function FeedScreen() {
               focusMode={focusMode}
               onToggleLike={(postId) => {
                 void togglePostLike(postId);
+              }}
+              onOpenProfile={openProfile}
+              onOpenComments={openComments}
+              onOpenMenu={setMenuPost}
+              onSharePost={(post) => {
+                void sharePost(post);
               }}
             />
           )}
@@ -402,6 +554,116 @@ export default function FeedScreen() {
           refreshing={refreshing}
         />
       </SafeAreaView>
+
+      <Modal
+        visible={!!commentsPost}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCommentsPost(null)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={styles.commentSheet}>
+            <View style={styles.sheetHeader}>
+              <View>
+                <Text style={styles.sheetTitle}>Comments</Text>
+                <Text style={styles.sheetSubtitle}>{commentsPost?.user.name ?? 'Kryno post'}</Text>
+              </View>
+              <TouchableOpacity style={styles.sheetClose} onPress={() => setCommentsPost(null)}>
+                <Ionicons name="close" size={18} color={COLORS.textSub} />
+              </TouchableOpacity>
+            </View>
+
+            <FlatList
+              data={visibleComments}
+              keyExtractor={(item) => item.id}
+              style={styles.commentList}
+              ListEmptyComponent={
+                <View style={styles.emptyComments}>
+                  <Ionicons name="chatbubble-outline" size={28} color={COLORS.primary} />
+                  <Text style={styles.emptyCommentsText}>No comments yet</Text>
+                </View>
+              }
+              renderItem={({ item }) => (
+                <View style={styles.commentRow}>
+                  <View style={styles.commentAvatar}>
+                    <Text style={styles.commentAvatarText}>{(item.displayName || item.username || 'K').slice(0, 1).toUpperCase()}</Text>
+                  </View>
+                  <View style={styles.commentBubble}>
+                    <View style={styles.commentMetaRow}>
+                      <Text style={styles.commentAuthor}>{item.displayName || item.username}</Text>
+                      <Text style={styles.commentTime}>{formatCommentTime(item.createdAt)}</Text>
+                    </View>
+                    <Text style={styles.commentBody}>{item.body}</Text>
+                  </View>
+                </View>
+              )}
+            />
+
+            <View style={styles.commentInputRow}>
+              <TextInput
+                value={commentText}
+                onChangeText={setCommentText}
+                placeholder="Add a comment"
+                placeholderTextColor={COLORS.textMuted}
+                style={styles.commentInput}
+                multiline
+              />
+              <TouchableOpacity
+                style={[styles.commentSend, (!commentText.trim() || commentBusy) && styles.commentSendDisabled]}
+                onPress={submitComment}
+                disabled={!commentText.trim() || commentBusy}
+                activeOpacity={0.85}
+              >
+                <Ionicons name={commentBusy ? 'hourglass-outline' : 'send'} size={17} color={COLORS.white} />
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={!!menuPost} transparent animationType="fade" onRequestClose={closeMenu}>
+        <TouchableOpacity style={styles.menuBackdrop} activeOpacity={1} onPress={closeMenu}>
+          <View style={styles.menuSheet}>
+            <Text style={styles.menuTitle}>Post options</Text>
+            <TouchableOpacity
+              style={styles.menuAction}
+              onPress={() => {
+                const post = menuPost;
+                setMenuPost(null);
+                if (post) openProfile(post.username || post.user.handle);
+              }}
+            >
+              <Ionicons name="person-outline" size={18} color={COLORS.textSub} />
+              <Text style={styles.menuActionText}>View profile</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.menuAction}
+              onPress={() => {
+                const post = menuPost;
+                setMenuPost(null);
+                if (post) void sharePost(post);
+              }}
+            >
+              <Ionicons name="paper-plane-outline" size={18} color={COLORS.textSub} />
+              <Text style={styles.menuActionText}>Share post</Text>
+            </TouchableOpacity>
+            {menuPostIsMine ? (
+              <TouchableOpacity style={styles.menuAction} onPress={handleDeletePost} disabled={deleteBusy}>
+                <Ionicons name="trash-outline" size={18} color={COLORS.pink} />
+                <Text style={[styles.menuActionText, styles.menuActionDanger]}>
+                  {deleteBusy ? 'Deleting...' : 'Delete post'}
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+            <TouchableOpacity style={styles.menuCancel} onPress={closeMenu}>
+              <Text style={styles.menuCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 }
@@ -540,4 +802,105 @@ const styles = StyleSheet.create({
   actionsLeft: { flexDirection: 'row', gap: 18 },
   actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   actionCount: { fontSize: FONTS.sm, color: COLORS.textMuted, fontWeight: FONTS.medium },
+
+  // Comments and menu
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    justifyContent: 'flex-end'
+  },
+  commentSheet: {
+    maxHeight: '78%',
+    borderTopLeftRadius: RADIUS.xl,
+    borderTopRightRadius: RADIUS.xl,
+    backgroundColor: COLORS.bgSurface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: SPACE.md,
+    paddingBottom: SPACE.lg,
+    gap: 12
+  },
+  sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  sheetTitle: { fontSize: FONTS.lg, color: COLORS.text, fontWeight: FONTS.bold },
+  sheetSubtitle: { fontSize: FONTS.xs, color: COLORS.textMuted, marginTop: 2 },
+  sheetClose: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.bgGlass,
+    borderWidth: 1,
+    borderColor: COLORS.border
+  },
+  commentList: { maxHeight: 360 },
+  emptyComments: { alignItems: 'center', justifyContent: 'center', paddingVertical: 36, gap: 8 },
+  emptyCommentsText: { fontSize: FONTS.sm, color: COLORS.textMuted, fontWeight: FONTS.medium },
+  commentRow: { flexDirection: 'row', gap: 10, marginBottom: 12 },
+  commentAvatar: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primarySofter,
+    borderWidth: 1,
+    borderColor: 'rgba(99,102,241,0.25)'
+  },
+  commentAvatarText: { color: COLORS.primaryLight, fontWeight: FONTS.bold, fontSize: FONTS.sm },
+  commentBubble: { flex: 1, backgroundColor: COLORS.bgCard, borderRadius: RADIUS.md, padding: 10, borderWidth: 1, borderColor: COLORS.border },
+  commentMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 3 },
+  commentAuthor: { color: COLORS.text, fontSize: FONTS.sm, fontWeight: FONTS.semibold },
+  commentTime: { color: COLORS.textMuted, fontSize: FONTS.xs },
+  commentBody: { color: COLORS.textSub, fontSize: FONTS.sm, lineHeight: 19 },
+  commentInputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
+  commentInput: {
+    flex: 1,
+    minHeight: 44,
+    maxHeight: 110,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.bgMid,
+    color: COLORS.text,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: FONTS.sm
+  },
+  commentSend: {
+    width: 44,
+    height: 44,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary
+  },
+  commentSendDisabled: { opacity: 0.45 },
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.68)',
+    justifyContent: 'flex-end',
+    padding: SPACE.md
+  },
+  menuSheet: {
+    borderRadius: RADIUS.xl,
+    backgroundColor: COLORS.bgSurface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: SPACE.md,
+    gap: 6
+  },
+  menuTitle: { color: COLORS.text, fontSize: FONTS.base, fontWeight: FONTS.bold, marginBottom: 4 },
+  menuAction: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 13 },
+  menuActionText: { color: COLORS.textSub, fontSize: FONTS.base, fontWeight: FONTS.medium },
+  menuActionDanger: { color: COLORS.pink },
+  menuCancel: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
+    paddingVertical: 12,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.bgGlass
+  },
+  menuCancelText: { color: COLORS.text, fontSize: FONTS.sm, fontWeight: FONTS.bold },
 });
