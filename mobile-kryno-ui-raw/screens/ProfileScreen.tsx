@@ -2,7 +2,9 @@ import React, { useState, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   Animated, Dimensions, StatusBar, Alert, Modal, TextInput,
+  Share,
 } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
@@ -178,6 +180,7 @@ function PrivacyToggle({ label, icon, on, onToggle }: { label: string; icon: any
 // ─── MAIN SCREEN ───────────────────────────────────────────────────────────────
 export default function ProfileScreen() {
   const { currentUser, profilePosts, stories, uploadProfilePhoto, createStoryFromMedia, createPostFromMedia, saveProfile } = useKrynoBackend();
+  const navigation = useNavigation<any>();
   const user = currentUser;
   const [status, setStatus] = useState<StatusType>((user.status as StatusType) || 'active');
   const [mood, setMood] = useState<MoodType>((user.mood as MoodType) || 'chill');
@@ -218,6 +221,21 @@ export default function ProfileScreen() {
     setEditBio(user.bio);
     setEditVisible(true);
   }, [user.bio, user.name]);
+
+  const shareProfile = useCallback(async () => {
+    await Share.share({
+      message: `${user.name} on KRYNO ${user.handle}`
+    });
+  }, [user.handle, user.name]);
+
+  const leaveProfile = useCallback(() => {
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+      return;
+    }
+
+    navigation.navigate('Feed');
+  }, [navigation]);
 
   const saveProfileEdits = useCallback(async () => {
     const nextName = editName.trim();
@@ -274,6 +292,14 @@ export default function ProfileScreen() {
       setMediaBusy(false);
     }
   }, [uploadProfilePhoto]);
+
+  const openProfileMenu = useCallback(() => {
+    Alert.alert('Profile options', 'Choose what you want to update.', [
+      { text: 'Edit profile', onPress: openEditProfile },
+      { text: 'Update profile photo', onPress: pickProfilePhoto },
+      { text: 'Cancel', style: 'cancel' }
+    ]);
+  }, [openEditProfile, pickProfilePhoto]);
 
   const pickStoryMedia = useCallback(async () => {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -379,10 +405,10 @@ export default function ProfileScreen() {
             <View style={styles.stickyHeaderContent}>
               <Text style={styles.stickyName}>{user.name}</Text>
               <View style={styles.stickyActions}>
-                <TouchableOpacity style={styles.stickyBtn}>
+                <TouchableOpacity style={styles.stickyBtn} onPress={shareProfile} activeOpacity={0.85}>
                   <Ionicons name="share-outline" size={18} color={COLORS.textSub} />
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.stickyBtn}>
+                <TouchableOpacity style={styles.stickyBtn} onPress={openProfileMenu} activeOpacity={0.85}>
                   <Ionicons name="ellipsis-horizontal" size={18} color={COLORS.textSub} />
                 </TouchableOpacity>
               </View>
@@ -399,14 +425,14 @@ export default function ProfileScreen() {
         <SafeAreaView edges={['top']}>
           {/* Top bar */}
           <View style={styles.topBar}>
-            <TouchableOpacity style={styles.topBarBtn}>
+            <TouchableOpacity style={styles.topBarBtn} onPress={leaveProfile} activeOpacity={0.85}>
               <Ionicons name="chevron-back" size={20} color={COLORS.text} />
             </TouchableOpacity>
             <View style={styles.topBarRight}>
-              <TouchableOpacity style={styles.topBarBtn}>
+              <TouchableOpacity style={styles.topBarBtn} onPress={shareProfile} activeOpacity={0.85}>
                 <Ionicons name="share-outline" size={18} color={COLORS.textSub} />
               </TouchableOpacity>
-              <TouchableOpacity style={styles.topBarBtn}>
+              <TouchableOpacity style={styles.topBarBtn} onPress={openProfileMenu} activeOpacity={0.85}>
                 <Ionicons name="settings-outline" size={18} color={COLORS.textSub} />
               </TouchableOpacity>
             </View>
@@ -515,7 +541,9 @@ export default function ProfileScreen() {
           <View>
             <View style={styles.rowHeader}>
               <Text style={styles.rowTitle}>Stories</Text>
-              <TouchableOpacity><Text style={styles.rowAction}>See all</Text></TouchableOpacity>
+              <TouchableOpacity onPress={() => Alert.alert('Stories', `${Math.max(stories.length - 1, 0)} active stories are visible here.`)}>
+                <Text style={styles.rowAction}>See all</Text>
+              </TouchableOpacity>
             </View>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               <View style={styles.storiesRow}>
@@ -528,7 +556,10 @@ export default function ProfileScreen() {
                     onPress={() => {
                       if (s.isAdd) {
                         void pickStoryMedia();
+                        return;
                       }
+
+                      Alert.alert('Story', `${s.label}'s story is active.`);
                     }}
                   >
                     <LinearGradient colors={s.gradient as any} style={styles.storyRing}>
@@ -550,7 +581,10 @@ export default function ProfileScreen() {
           </View>
 
           {lockedPostsCount > 0 && (
-          <TouchableOpacity activeOpacity={0.9}>
+          <TouchableOpacity
+            activeOpacity={0.9}
+            onPress={() => Alert.alert('Inner Circle', `${lockedPostsCount} locked ${lockedPostsCount === 1 ? 'post' : 'posts'} on your profile.`)}
+          >
             <LinearGradient
               colors={['rgba(99,102,241,0.22)', 'rgba(6,182,212,0.1)', 'rgba(139,92,246,0.15)']}
               start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
