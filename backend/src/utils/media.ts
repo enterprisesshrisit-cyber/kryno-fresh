@@ -88,10 +88,6 @@ export function assertTrustedMediaPayload(mimeType: string, bytes: Buffer) {
     throw new AppError(400, 'Unsupported or unreadable media file.', 'INVALID_MEDIA_TYPE');
   }
 
-  if (normalizedMimeType && normalizedMimeType !== 'application/octet-stream' && normalizedMimeType !== sniffedMimeType) {
-    throw new AppError(400, 'Uploaded file content does not match its declared media type.', 'MEDIA_SIGNATURE_MISMATCH');
-  }
-
   return sniffedMimeType;
 }
 
