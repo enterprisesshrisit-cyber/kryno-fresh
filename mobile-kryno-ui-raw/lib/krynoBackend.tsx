@@ -645,6 +645,10 @@ async function fetchWithTimeout(
   }
 }
 
+type ApiFetchInit = RequestInit & {
+  timeoutMs?: number;
+};
+
 async function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
   let timeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -711,11 +715,17 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   }, [currentCall]);
 
   const apiFetch = useCallback(
-    async <T,>(path: string, init: RequestInit = {}, allowRefresh = true): Promise<T> => {
+    async <T,>(path: string, init: ApiFetchInit = {}, allowRefresh = true): Promise<T> => {
       const apiOrigin = requireBackendOrigin(backendOrigin);
       const activeSession = sessionRef.current;
-      const headers = new Headers(init.headers ?? {});
-      const isFormDataBody = typeof FormData !== 'undefined' && init.body instanceof FormData;
+      const { timeoutMs, ...requestInit } = init;
+      const headers = new Headers(requestInit.headers ?? {});
+      const body = requestInit.body;
+      const isFormDataBody =
+        typeof FormData !== 'undefined' &&
+        (body instanceof FormData ||
+          Object.prototype.toString.call(body) === '[object FormData]' ||
+          (typeof body === 'object' && body !== null && Object.prototype.hasOwnProperty.call(body, '_parts')));
 
       if (!isFormDataBody) {
         headers.set('Content-Type', 'application/json');
@@ -726,9 +736,9 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       }
 
       const response = await fetchWithTimeout(`${apiOrigin}/api${path}`, {
-        ...init,
+        ...requestInit,
         headers
-      });
+      }, timeoutMs ?? 20_000);
 
       if (response.status === 401 && allowRefresh && activeSession && deviceProfile) {
         const refreshResponse = await fetchWithTimeout(`${apiOrigin}/api/auth/refresh`, {
@@ -2387,6 +2397,28 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     ) => {
       const mimeType = guessMimeType(input.uri, input.mimeType);
       const fileName = guessFileName(input.uri, input.fileName, mimeType);
+      const uploadTimeoutMs = 120_000;
+      const uploadJsonPayload = async (bytesBase64: string) => {
+        const payload = bytesBase64.trim();
+        if (!payload) {
+          throw new Error('Could not read that media file from Android. Please choose another photo or video.');
+        }
+
+        return apiFetch<SocialMediaUpload>('/social/media', {
+          method: 'POST',
+          timeoutMs: uploadTimeoutMs,
+          body: JSON.stringify({
+            kind,
+            fileName,
+            mimeType,
+            bytesBase64: payload
+          })
+        });
+      };
+
+      if (input.bytesBase64) {
+        return uploadJsonPayload(input.bytesBase64);
+      }
 
       const formData = new FormData();
       formData.append('kind', kind);
@@ -2401,6 +2433,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       try {
         return await apiFetch<SocialMediaUpload>('/social/media', {
           method: 'POST',
+          timeoutMs: uploadTimeoutMs,
           body: formData as any
         });
       } catch (multipartError) {
@@ -2415,15 +2448,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           ));
 
         try {
-          return await apiFetch<SocialMediaUpload>('/social/media', {
-            method: 'POST',
-            body: JSON.stringify({
-              kind,
-              fileName,
-              mimeType,
-              bytesBase64
-            })
-          });
+          return await uploadJsonPayload(bytesBase64);
         } catch (jsonError) {
           throw jsonError instanceof Error ? jsonError : multipartError;
         }
