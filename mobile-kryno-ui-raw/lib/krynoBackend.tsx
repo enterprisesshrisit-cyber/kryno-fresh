@@ -1111,6 +1111,9 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     setBootstrap(bootstrapResponse);
     setProfile(profileResponse);
 
+    const suggestions = Array.isArray(bootstrapResponse.suggestions) ? bootstrapResponse.suggestions : [];
+    const stories = Array.isArray(bootstrapResponse.stories) ? bootstrapResponse.stories : [];
+
     const nextKnownUsers: KnownChatUser[] = [
       {
         id: bootstrapResponse.me.userId,
@@ -1122,7 +1125,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         online: true,
         handle: `@${bootstrapResponse.me.username}`
       },
-      ...bootstrapResponse.suggestions.map((entry, index) => ({
+      ...suggestions.map((entry, index) => ({
         id: entry.userId,
         username: entry.username,
         displayName: entry.displayName,
@@ -1132,7 +1135,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         online: index % 2 === 0,
         handle: `@${entry.username}`
       })),
-      ...bootstrapResponse.stories.map((story, index) => ({
+      ...stories.map((story, index) => ({
         id: undefined,
         username: story.author.username,
         displayName: story.author.displayName,
@@ -1277,10 +1280,14 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       return;
     }
 
-    void refreshMobileInbox();
+    void refreshMobileInbox().catch((inboxError) => {
+      setError(inboxError instanceof Error ? inboxError.message : 'Secure inbox sync is temporarily unavailable.');
+    });
 
     const intervalId = setInterval(() => {
-      void refreshMobileInbox();
+      void refreshMobileInbox().catch((inboxError) => {
+        setError(inboxError instanceof Error ? inboxError.message : 'Secure inbox sync is temporarily unavailable.');
+      });
     }, 12000);
 
     return () => {
@@ -1296,29 +1303,35 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     let cancelled = false;
 
     void (async () => {
-      const { connectMobileDirectRelay } = await getMobileSignalModule();
-      if (cancelled) {
-        return;
-      }
-
-      const relay = connectMobileDirectRelay(requireBackendOrigin(backendOrigin), session, deviceProfile, {
-        onMessage: async (message) => {
-          if (seenInboxRef.current.has(message.id)) {
-            return;
-          }
-          if (message.kind === 'call_media_key') {
-            applyCallMediaKey(message as MobileSignalCallMediaKey);
-          } else {
-            ingestSignalMessages([message as MobileSignalMessage], { markUnread: true });
-          }
-          setSeenInboxMessageIds((current) => [...new Set([...current, message.id])]);
-        },
-        onCallEvent: async (event) => {
-          await handleRelayCallEventRef.current?.(event);
+      try {
+        const { connectMobileDirectRelay } = await getMobileSignalModule();
+        if (cancelled) {
+          return;
         }
-      });
 
-      relayHandleRef.current = relay;
+        const relay = connectMobileDirectRelay(requireBackendOrigin(backendOrigin), session, deviceProfile, {
+          onMessage: async (message) => {
+            if (seenInboxRef.current.has(message.id)) {
+              return;
+            }
+            if (message.kind === 'call_media_key') {
+              applyCallMediaKey(message as MobileSignalCallMediaKey);
+            } else {
+              ingestSignalMessages([message as MobileSignalMessage], { markUnread: true });
+            }
+            setSeenInboxMessageIds((current) => [...new Set([...current, message.id])]);
+          },
+          onCallEvent: async (event) => {
+            await handleRelayCallEventRef.current?.(event);
+          }
+        });
+
+        relayHandleRef.current = relay;
+      } catch (relayError) {
+        if (!cancelled) {
+          setError(relayError instanceof Error ? relayError.message : 'Secure relay is temporarily unavailable.');
+        }
+      }
     })();
 
     return () => {
@@ -1361,9 +1374,14 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         setSession(nextSession);
         sessionRef.current = nextSession;
         await secureSet(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
-        const { bootstrapMobileSignalDevice } = await getMobileSignalModule();
-        await bootstrapMobileSignalDevice(apiOrigin, nextSession, deviceProfile);
-        await Promise.all([loadSocialState(), loadBillingState()]);
+        try {
+          const { bootstrapMobileSignalDevice } = await getMobileSignalModule();
+          await bootstrapMobileSignalDevice(apiOrigin, nextSession, deviceProfile);
+          await Promise.all([loadSocialState(), loadBillingState()]);
+        } catch (postLoginError) {
+          // Do not turn a valid login into a white-screen startup if staging sync is degraded.
+          setError(postLoginError instanceof Error ? postLoginError.message : 'Signed in, but live data sync is degraded.');
+        }
       } catch (loginError) {
         setError(loginError instanceof Error ? loginError.message : 'Unable to sign in.');
         throw loginError;

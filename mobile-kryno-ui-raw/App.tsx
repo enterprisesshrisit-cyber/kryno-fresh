@@ -1,6 +1,6 @@
 import React from 'react';
 import { ActivityIndicator, View, Text, StyleSheet, Platform, TouchableOpacity } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import { DarkTheme, NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -25,6 +25,19 @@ initMobileObservability();
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
+const krynoNavigationTheme = {
+  ...DarkTheme,
+  colors: {
+    ...DarkTheme.colors,
+    background: COLORS.bg,
+    card: COLORS.bg,
+    border: COLORS.border,
+    text: COLORS.text,
+    primary: COLORS.primary,
+    notification: COLORS.pink
+  }
+};
+
 class AppErrorBoundary extends React.Component<
   { children: React.ReactNode },
   { error: Error | null }
@@ -35,8 +48,11 @@ class AppErrorBoundary extends React.Component<
   }
 
   static getDerivedStateFromError(error: Error) {
-    captureMobileException(error, { surface: 'AppErrorBoundary' });
     return { error };
+  }
+
+  componentDidCatch(error: Error) {
+    captureMobileException(error, { surface: 'AppErrorBoundary' });
   }
 
   render() {
@@ -352,7 +368,7 @@ function CallOverlay() {
 }
 
 function AppShell() {
-  const { initialized, loading, session } = useKrynoBackend();
+  const { error, initialized, loading, session } = useKrynoBackend();
 
   if (!initialized) {
     return (
@@ -383,21 +399,26 @@ function AppShell() {
   }
 
   return (
-    <>
+    <View style={appStyles.appSurface}>
       <MainTabs />
       <CallOverlay />
-    </>
+      {error ? (
+        <View style={appStyles.syncNotice} pointerEvents="none">
+          <Text style={appStyles.syncNoticeText} numberOfLines={2}>{error}</Text>
+        </View>
+      ) : null}
+    </View>
   );
 }
 
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
+    <GestureHandlerRootView style={appStyles.appSurface}>
       <SafeAreaProvider>
         <AppErrorBoundary>
           <KrynoBackendProvider>
-            <NavigationContainer>
+            <NavigationContainer theme={krynoNavigationTheme}>
               <AppShell />
             </NavigationContainer>
           </KrynoBackendProvider>
@@ -481,6 +502,10 @@ const tabStyles = StyleSheet.create({
 });
 
 const appStyles = StyleSheet.create({
+  appSurface: {
+    flex: 1,
+    backgroundColor: COLORS.bg,
+  },
   splash: {
     flex: 1,
     backgroundColor: COLORS.bg,
@@ -523,6 +548,24 @@ const appStyles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 14,
     lineHeight: 22,
+    textAlign: 'center',
+  },
+  syncNotice: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    top: Platform.OS === 'ios' ? 58 : 24,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(245,158,11,0.26)',
+    backgroundColor: 'rgba(15,23,42,0.94)',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  syncNoticeText: {
+    color: COLORS.textSub,
+    fontSize: 12,
+    fontWeight: '600',
     textAlign: 'center',
   },
 });
