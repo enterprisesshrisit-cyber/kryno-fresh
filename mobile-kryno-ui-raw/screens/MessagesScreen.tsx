@@ -282,7 +282,7 @@ export default function MessagesScreen() {
               }
               renderItem={({ item }) => (
                 <TouchableOpacity style={styles.searchResultRow} activeOpacity={0.85} onPress={() => openConversationFromSearch(item)}>
-                  <Image source={{ uri: item.avatar_url || `https://i.pravatar.cc/150?u=${encodeURIComponent(item.username)}` }} style={styles.searchResultAvatar} contentFit="cover" />
+                  <Image source={{ uri: item.avatar_url || `https://api.dicebear.com/9.x/initials/png?seed=${encodeURIComponent(item.username)}&backgroundColor=111827&fontColor=e5e7eb` }} style={styles.searchResultAvatar} contentFit="cover" />
                   <View style={styles.searchResultText}>
                     <Text style={styles.searchResultName}>{item.display_name || item.username}</Text>
                     <Text style={styles.searchResultHandle}>@{item.username}</Text>

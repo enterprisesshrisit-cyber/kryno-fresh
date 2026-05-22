@@ -1,4 +1,5 @@
 import { FastifyReply, FastifyRequest } from 'fastify';
+import { MultipartFile } from '@fastify/multipart';
 import { z } from 'zod';
 import { AppError } from '../utils/errors.js';
 import { socialService } from '../services/social.service.js';
@@ -9,6 +10,8 @@ const mediaUploadSchema = z.object({
   mimeType: z.string().min(1).max(160),
   bytesBase64: z.string().min(1)
 });
+
+const mediaUploadFieldsSchema = mediaUploadSchema.omit({ bytesBase64: true });
 
 const updateProfileSchema = z.object({
   displayName: z.string().trim().min(1).max(80).optional(),
@@ -48,6 +51,13 @@ const feedQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(50).optional()
 });
 
+type MediaUploadFieldMap = Record<string, string | MultipartFile | undefined>;
+
+function getFieldString(fields: MediaUploadFieldMap, key: string) {
+  const value = fields[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
 function parseBase64(value: string) {
   try {
     const bytes = Buffer.from(value, 'base64');
@@ -66,6 +76,44 @@ export async function socialBootstrapController(request: FastifyRequest, reply: 
 }
 
 export async function uploadMediaController(request: FastifyRequest, reply: FastifyReply) {
+  if (request.isMultipart()) {
+    const values: MediaUploadFieldMap = {};
+
+    for await (const part of request.parts()) {
+      if (part.type === 'file') {
+        values[part.fieldname] = part;
+      } else {
+        values[part.fieldname] = String(part.value ?? '');
+      }
+    }
+
+    const media = values.media ?? values.file ?? values.blob;
+
+    if (!media || typeof media === 'string') {
+      throw new AppError(400, 'Media file is required.', 'MISSING_SOCIAL_MEDIA_FILE');
+    }
+
+    const fields = mediaUploadFieldsSchema.parse({
+      kind: getFieldString(values, 'kind'),
+      fileName: getFieldString(values, 'fileName') ?? media.filename,
+      mimeType: getFieldString(values, 'mimeType') ?? media.mimetype
+    });
+    const bytes = await media.toBuffer();
+
+    if (bytes.byteLength === 0) {
+      throw new AppError(400, 'Media file is empty.', 'EMPTY_SOCIAL_MEDIA_FILE');
+    }
+
+    const result = await socialService.uploadMedia({
+      userId: request.auth.userId,
+      kind: fields.kind,
+      fileName: fields.fileName,
+      mimeType: fields.mimeType,
+      bytes
+    });
+    return reply.code(201).send(result);
+  }
+
   const body = mediaUploadSchema.parse(request.body ?? {});
   const result = await socialService.uploadMedia({
     userId: request.auth.userId,

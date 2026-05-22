@@ -36,6 +36,13 @@ type DeviceProfile = {
   deviceSeed: string;
 };
 
+type MediaUploadInput = {
+  uri: string;
+  fileName?: string | null;
+  mimeType?: string | null;
+  bytesBase64?: string | null;
+};
+
 type SocialProfile = {
   userId: string;
   username: string;
@@ -148,6 +155,7 @@ type RelayDirectMessage = {
 
 type FeedPostModel = typeof FEED_POSTS[number] & {
   likedByMe?: boolean;
+  mediaKind?: 'text' | 'image' | 'video';
 };
 
 type StoryModel = typeof STORIES[number];
@@ -316,11 +324,12 @@ type KrynoBackendContextValue = {
   togglePostLike: (postId: string) => Promise<void>;
   toggleFollow: (username: string, isFollowing: boolean) => Promise<void>;
   saveProfile: (input: { displayName: string; bio: string }) => Promise<void>;
-  uploadProfilePhoto: (input: { uri: string; fileName?: string | null; mimeType?: string | null }) => Promise<void>;
+  uploadProfilePhoto: (input: MediaUploadInput) => Promise<void>;
   createPostFromMedia: (input: {
     uri: string;
     fileName?: string | null;
     mimeType?: string | null;
+    bytesBase64?: string | null;
     caption?: string;
   }) => Promise<void>;
   createTextPost: (input: { caption: string }) => Promise<void>;
@@ -328,6 +337,7 @@ type KrynoBackendContextValue = {
     uri: string;
     fileName?: string | null;
     mimeType?: string | null;
+    bytesBase64?: string | null;
     caption?: string;
   }) => Promise<void>;
 };
@@ -339,6 +349,14 @@ const MOBILE_CHAT_MESSAGES_STORAGE_KEY = 'kryno_mobile_chat_messages_v1';
 const MOBILE_CHAT_THREADS_STORAGE_KEY = 'kryno_mobile_chat_threads_v1';
 const MOBILE_CHAT_KNOWN_USERS_STORAGE_KEY = 'kryno_mobile_chat_known_users_v1';
 const MOBILE_CHAT_SEEN_INBOX_STORAGE_KEY = 'kryno_mobile_chat_seen_inbox_v1';
+const MOBILE_STORAGE_SCHEMA_KEY = 'kryno_mobile_storage_schema_version';
+const MOBILE_STORAGE_SCHEMA_VERSION = '2026-05-22-stable-shell-v2';
+const RESET_ON_SCHEMA_CHANGE_KEYS = [
+  MOBILE_CHAT_MESSAGES_STORAGE_KEY,
+  MOBILE_CHAT_THREADS_STORAGE_KEY,
+  MOBILE_CHAT_KNOWN_USERS_STORAGE_KEY,
+  MOBILE_CHAT_SEEN_INBOX_STORAGE_KEY
+];
 const DEFAULT_BACKEND_ORIGIN =
   process.env.EXPO_PUBLIC_KRYNO_API_URL ||
   process.env.EXPO_PUBLIC_KRYNO_BACKEND_URL ||
@@ -347,6 +365,7 @@ const DEFAULT_BACKEND_ORIGIN =
 const BUILD_LOCKED_BACKEND_ORIGIN = !__DEV__ && DEFAULT_BACKEND_ORIGIN.trim()
   ? DEFAULT_BACKEND_ORIGIN.trim().replace(/\/+$/, '')
   : '';
+const STABLE_STARTUP_MODE = process.env.EXPO_PUBLIC_KRYNO_STABLE_STARTUP !== 'false';
 
 const TIER_SEQUENCE = ['Basic', 'Inner Circle', 'Elite'] as const;
 const MOOD_SEQUENCE = ['chill', 'social', 'focus'] as const;
@@ -394,7 +413,8 @@ function fallbackAvatar(label: string, avatarUrl?: string | null) {
     return avatarUrl.startsWith('http') ? avatarUrl : `${avatarUrl}`;
   }
 
-  return `https://i.pravatar.cc/300?u=${encodeURIComponent(label)}`;
+  const seed = encodeURIComponent(safeText(label.replace(/^@/, ''), 'Kryno'));
+  return `https://api.dicebear.com/9.x/initials/png?seed=${seed}&backgroundColor=111827&fontColor=e5e7eb`;
 }
 
 function resolveMediaUrl(backendOrigin: string, mediaUrl: string | null | undefined, fallback: string) {
@@ -510,6 +530,24 @@ async function loadStoredJson<T>(key: string, fallback: T) {
   }
 }
 
+function asArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
+function asRecord<T>(value: unknown): Record<string, T> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, T>) : {};
+}
+
+async function migrateMobileStartupStorage() {
+  const currentVersion = await AsyncStorage.getItem(MOBILE_STORAGE_SCHEMA_KEY);
+  if (currentVersion === MOBILE_STORAGE_SCHEMA_VERSION) {
+    return;
+  }
+
+  await Promise.all(RESET_ON_SCHEMA_CHANGE_KEYS.map((key) => AsyncStorage.removeItem(key)));
+  await AsyncStorage.setItem(MOBILE_STORAGE_SCHEMA_KEY, MOBILE_STORAGE_SCHEMA_VERSION);
+}
+
 function getRelayWebSocketUrl(origin: string) {
   if (origin.startsWith('https://')) {
     return `${origin.replace(/^https:\/\//, 'wss://')}/api/messages/ws`;
@@ -549,7 +587,14 @@ async function secureDelete(key: string) {
 async function loadDeviceProfile() {
   const stored = await AsyncStorage.getItem(DEVICE_PROFILE_STORAGE_KEY);
   if (stored) {
-    return JSON.parse(stored) as DeviceProfile;
+    try {
+      const parsed = JSON.parse(stored) as Partial<DeviceProfile>;
+      if (parsed.deviceId && parsed.deviceName && parsed.deviceSeed) {
+        return parsed as DeviceProfile;
+      }
+    } catch {
+      await AsyncStorage.removeItem(DEVICE_PROFILE_STORAGE_KEY);
+    }
   }
 
   const profile: DeviceProfile = {
@@ -597,6 +642,23 @@ async function fetchWithTimeout(
     throw error;
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
   }
 }
 
@@ -653,7 +715,11 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       const apiOrigin = requireBackendOrigin(backendOrigin);
       const activeSession = sessionRef.current;
       const headers = new Headers(init.headers ?? {});
-      headers.set('Content-Type', 'application/json');
+      const isFormDataBody = typeof FormData !== 'undefined' && init.body instanceof FormData;
+
+      if (!isFormDataBody) {
+        headers.set('Content-Type', 'application/json');
+      }
 
       if (activeSession?.accessToken) {
         headers.set('Authorization', `Bearer ${activeSession.accessToken}`);
@@ -1081,6 +1147,10 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   }, []);
 
   const refreshMobileInbox = useCallback(async () => {
+    if (STABLE_STARTUP_MODE) {
+      return;
+    }
+
     if (!sessionRef.current || !deviceProfile) {
       return;
     }
@@ -1183,11 +1253,28 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     }
   }, [apiFetch]);
 
+  const syncAuthenticatedState = useCallback(async () => {
+    if (!sessionRef.current || !deviceProfile) {
+      return;
+    }
+
+    try {
+      setRefreshing(true);
+      setError('');
+      await Promise.all([loadSocialState(), loadBillingState()]);
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : 'Signed in, but live sync is temporarily unavailable.');
+    } finally {
+      setRefreshing(false);
+    }
+  }, [backendOrigin, deviceProfile, loadBillingState, loadSocialState]);
+
   useEffect(() => {
     let mounted = true;
 
     const hydrate = async () => {
       try {
+        await migrateMobileStartupStorage();
         const [storedOrigin, storedSession, nextDeviceProfile, cachedMessages, cachedThreads, cachedUsers, cachedSeenInbox] = await Promise.all([
           AsyncStorage.getItem(BACKEND_ORIGIN_STORAGE_KEY),
           secureGet(SESSION_STORAGE_KEY),
@@ -1210,12 +1297,16 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         }
 
         setDeviceProfile(nextDeviceProfile);
-        setChatMessages(cachedMessages);
-        setStoredThreads(cachedThreads);
-        setKnownChatUsers(cachedUsers);
-        knownUsersRef.current = cachedUsers;
-        setSeenInboxMessageIds(cachedSeenInbox);
-        seenInboxRef.current = new Set(cachedSeenInbox);
+        const safeMessages = asArray<ChatMessageModel>(cachedMessages);
+        const safeThreads = asArray<ConversationSeed>(cachedThreads);
+        const safeUsers = asRecord<KnownChatUser>(cachedUsers);
+        const safeSeenInbox = asArray<string>(cachedSeenInbox);
+        setChatMessages(safeMessages);
+        setStoredThreads(safeThreads);
+        setKnownChatUsers(safeUsers);
+        knownUsersRef.current = safeUsers;
+        setSeenInboxMessageIds(safeSeenInbox);
+        seenInboxRef.current = new Set(safeSeenInbox);
 
         if (storedSession) {
           const parsedSession = JSON.parse(storedSession) as AuthSession;
@@ -1280,23 +1371,14 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       return;
     }
 
-    void (async () => {
-      try {
-        setRefreshing(true);
-        setError('');
-        const apiOrigin = requireBackendOrigin(backendOrigin);
-        const { bootstrapMobileSignalDevice } = await getMobileSignalModule();
-        await bootstrapMobileSignalDevice(apiOrigin, session, deviceProfile);
-        await Promise.all([loadSocialState(), loadBillingState()]);
-      } catch (refreshError) {
-        setError(refreshError instanceof Error ? refreshError.message : 'Unable to load social data.');
-      } finally {
-        setRefreshing(false);
-      }
-    })();
-  }, [backendOrigin, deviceProfile, initialized, loadBillingState, loadSocialState, session]);
+    void syncAuthenticatedState();
+  }, [deviceProfile, initialized, session, syncAuthenticatedState]);
 
   useEffect(() => {
+    if (STABLE_STARTUP_MODE) {
+      return;
+    }
+
     if (!initialized || !session || !deviceProfile) {
       return;
     }
@@ -1317,6 +1399,10 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   }, [deviceProfile, initialized, refreshMobileInbox, session]);
 
   useEffect(() => {
+    if (STABLE_STARTUP_MODE) {
+      return;
+    }
+
     if (!initialized || !session || !deviceProfile) {
       return;
     }
@@ -1401,14 +1487,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         setSession(nextSession);
         sessionRef.current = nextSession;
         await secureSet(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
-        try {
-          const { bootstrapMobileSignalDevice } = await getMobileSignalModule();
-          await bootstrapMobileSignalDevice(apiOrigin, nextSession, deviceProfile);
-          await Promise.all([loadSocialState(), loadBillingState()]);
-        } catch (postLoginError) {
-          // Do not turn a valid login into a white-screen startup if staging sync is degraded.
-          setError(postLoginError instanceof Error ? postLoginError.message : 'Signed in, but live data sync is degraded.');
-        }
+        setLoading(false);
+        void syncAuthenticatedState();
       } catch (loginError) {
         setError(loginError instanceof Error ? loginError.message : 'Unable to sign in.');
         throw loginError;
@@ -1416,7 +1496,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         setLoading(false);
       }
     },
-    [backendOrigin, deviceProfile, loadBillingState, loadSocialState]
+    [backendOrigin, deviceProfile, syncAuthenticatedState]
   );
 
   const signup = useCallback(
@@ -1605,11 +1685,6 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     setRefreshing(true);
     setError('');
     try {
-      if (sessionRef.current && deviceProfile) {
-        const apiOrigin = requireBackendOrigin(backendOrigin);
-        const { bootstrapMobileSignalDevice } = await getMobileSignalModule();
-        await bootstrapMobileSignalDevice(apiOrigin, sessionRef.current, deviceProfile);
-      }
       await Promise.all([loadSocialState(), loadBillingState()]);
       await refreshMobileInbox();
     } catch (refreshError) {
@@ -1938,6 +2013,10 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
   const startConversationCall = useCallback(
     async (conversation: Pick<ConversationSeed, 'conversationKey' | 'recipientLookup' | 'user'>, mode: MobileCallMode) => {
+      if (STABLE_STARTUP_MODE) {
+        throw new Error('Calls are disabled in this stable startup build while login stability is being verified.');
+      }
+
       if (!sessionRef.current || !deviceProfile || !relayHandleRef.current) {
         throw new Error('Secure relay is not connected yet.');
       }
@@ -2304,29 +2383,57 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const uploadSocialMedia = useCallback(
     async (
       kind: 'avatar' | 'post' | 'story',
-      input: { uri: string; fileName?: string | null; mimeType?: string | null }
+      input: MediaUploadInput
     ) => {
       const mimeType = guessMimeType(input.uri, input.mimeType);
       const fileName = guessFileName(input.uri, input.fileName, mimeType);
-      const bytesBase64 = await FileSystem.readAsStringAsync(input.uri, {
-        encoding: FileSystem.EncodingType.Base64
-      });
 
-      return apiFetch<SocialMediaUpload>('/social/media', {
-        method: 'POST',
-        body: JSON.stringify({
-          kind,
-          fileName,
-          mimeType,
-          bytesBase64
-        })
-      });
+      const formData = new FormData();
+      formData.append('kind', kind);
+      formData.append('fileName', fileName);
+      formData.append('mimeType', mimeType);
+      formData.append('media', {
+        uri: input.uri,
+        name: fileName,
+        type: mimeType
+      } as any);
+
+      try {
+        return await apiFetch<SocialMediaUpload>('/social/media', {
+          method: 'POST',
+          body: formData as any
+        });
+      } catch (multipartError) {
+        const bytesBase64 =
+          input.bytesBase64 ??
+          (await promiseWithTimeout(
+            FileSystem.readAsStringAsync(input.uri, {
+              encoding: FileSystem.EncodingType.Base64
+            }),
+            30_000,
+            'Could not read that media file from Android. Please choose another photo or video.'
+          ));
+
+        try {
+          return await apiFetch<SocialMediaUpload>('/social/media', {
+            method: 'POST',
+            body: JSON.stringify({
+              kind,
+              fileName,
+              mimeType,
+              bytesBase64
+            })
+          });
+        } catch (jsonError) {
+          throw jsonError instanceof Error ? jsonError : multipartError;
+        }
+      }
     },
     [apiFetch]
   );
 
   const uploadProfilePhoto = useCallback(
-    async (input: { uri: string; fileName?: string | null; mimeType?: string | null }) => {
+    async (input: MediaUploadInput) => {
       const media = await uploadSocialMedia('avatar', input);
       const updated = await apiFetch<SocialProfile>('/social/profile/me', {
         method: 'PUT',
@@ -2349,7 +2456,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   );
 
   const createStoryFromMedia = useCallback(
-    async (input: { uri: string; fileName?: string | null; mimeType?: string | null; caption?: string }) => {
+    async (input: MediaUploadInput & { caption?: string }) => {
       const media = await uploadSocialMedia('story', input);
       await apiFetch<SocialStory>('/social/stories', {
         method: 'POST',
@@ -2365,7 +2472,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   );
 
   const createPostFromMedia = useCallback(
-    async (input: { uri: string; fileName?: string | null; mimeType?: string | null; caption?: string }) => {
+    async (input: MediaUploadInput & { caption?: string }) => {
       const media = await uploadSocialMedia('post', input);
       await apiFetch<SocialPost>('/social/posts', {
         method: 'POST',
@@ -2397,13 +2504,12 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const feedPosts = useMemo<FeedPostModel[]>(() => {
     const source = Array.isArray(bootstrap?.feed) ? bootstrap.feed : [];
     if (source.length === 0) {
-      return FEED_POSTS;
+      return [];
     }
 
     return source.filter((post) => !!post?.id).map((post, index) => {
       const username = safeText(post.author?.username, `author-${index}`);
       const seed = computeHash(username) + index;
-      const fallbackPost = FEED_POSTS[index % FEED_POSTS.length];
       return {
         id: post.id,
         user: {
@@ -2412,7 +2518,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           avatar: fallbackAvatar(username, post.author?.avatarUrl),
           tier: pickTier(seed)
         },
-        image: resolveMediaUrl(backendOrigin, post.mediaUrl, fallbackPost.image),
+        image: resolveMediaUrl(backendOrigin, post.mediaUrl, ''),
         caption: post.caption || 'Shared a private Kryno moment.',
         captionKeywords: pickKeywords(post.caption || ''),
         timeAgo: formatTimeAgo(post.createdAt),
@@ -2420,28 +2526,49 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         comments: Number(post.commentCount ?? 0),
         locked: post.visibility === 'private_circle',
         mood: pickMood(seed),
-        likedByMe: Boolean(post.likedByMe)
+        likedByMe: Boolean(post.likedByMe),
+        mediaKind: post.mediaKind
       };
     });
   }, [backendOrigin, bootstrap]);
 
   const currentUser = useMemo<MeModel>(() => {
     const source = profile ?? bootstrap?.me;
+    const sessionUser = session?.user ?? sessionRef.current?.user ?? null;
+    const fallbackUsername = safeText(sessionUser?.username, sessionUser?.email?.split('@')[0] ?? 'kryno');
+    const emptyUser = {
+      ...ME,
+      id: sessionUser?.id ?? ME.id,
+      name: fallbackUsername,
+      handle: `@${fallbackUsername}`,
+      avatar: fallbackAvatar(fallbackUsername),
+      bio: '',
+      bioKeywords: [],
+      tier: 'Basic' as const,
+      joinDate: 'Today',
+      status: 'active' as const,
+      mood: 'chill' as const,
+      interests: [],
+      identityTags: [],
+      stats: { posts: 0, followers: 0, following: 0, visits: 0 },
+      music: { title: '', artist: '', progress: 0, duration: '' }
+    };
+
     if (!source) {
-      return ME;
+      return emptyUser;
     }
 
-    const username = safeText(source.username, sessionRef.current?.user.username ?? 'kryno');
+    const username = safeText(source.username, fallbackUsername);
     const ownPostsCount = (Array.isArray(bootstrap?.feed) ? bootstrap.feed : []).filter((post) => post.author?.username === username).length;
     const seed = computeHash(username);
 
     return {
-      ...ME,
-      id: source.userId ?? sessionRef.current?.user.id ?? ME.id,
+      ...emptyUser,
+      id: source.userId ?? sessionUser?.id ?? ME.id,
       name: safeText(source.displayName, username),
       handle: `@${username}`,
       avatar: fallbackAvatar(username, source.avatarUrl),
-      bio: source.bio || 'New to Kryno. Building a quieter social identity.',
+      bio: source.bio || '',
       bioKeywords: pickKeywords(source.bio || ''),
       tier: pickTier(seed),
       status: 'active',
@@ -2450,15 +2577,15 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         posts: ownPostsCount,
         followers: Number(source.followersCount ?? 0),
         following: Number(source.followingCount ?? 0),
-        visits: Math.max(48, ownPostsCount * 12)
+        visits: 0
       }
     };
-  }, [bootstrap, profile]);
+  }, [bootstrap, profile, session]);
 
   const stories = useMemo<StoryModel[]>(() => {
     const liveStories = Array.isArray(bootstrap?.stories) ? bootstrap.stories : [];
     if (liveStories.length === 0) {
-      return STORIES;
+      return STORIES[0] ? [STORIES[0]] : [];
     }
 
     return [
@@ -2483,7 +2610,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const featuredMembers = useMemo<FeaturedMemberModel[]>(() => {
     const liveSuggestions = Array.isArray(bootstrap?.suggestions) ? bootstrap.suggestions : [];
     if (liveSuggestions.length === 0) {
-      return FEATURED_MEMBERS;
+      return [];
     }
 
     return liveSuggestions.filter((member) => !!member?.username).map((member, index) => {
@@ -2505,15 +2632,15 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const discoverPosts = useMemo(() => {
     const feed = Array.isArray(bootstrap?.feed) ? bootstrap.feed : [];
     if (!feed.length) {
-      return DISCOVER_POSTS;
+      return [];
     }
 
     return feed
       .filter((post) => post.mediaUrl)
       .slice(0, 8)
-      .map((post, index) => ({
+        .map((post, index) => ({
         id: post.id,
-        image: resolveMediaUrl(backendOrigin, post.mediaUrl, DISCOVER_POSTS[index % DISCOVER_POSTS.length].image),
+        image: resolveMediaUrl(backendOrigin, post.mediaUrl, ''),
         category: DISCOVER_CATEGORIES[(index % (DISCOVER_CATEGORIES.length - 1)) + 1]?.id ?? 'all',
         tall: index % 3 === 0,
         likes: Number(post.likeCount ?? 0)
@@ -2521,14 +2648,16 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   }, [backendOrigin, bootstrap]);
 
   const profilePosts = useMemo<ProfilePostModel[]>(() => {
-    const ownPosts = (Array.isArray(bootstrap?.feed) ? bootstrap.feed : []).filter((post) => post.author?.username === currentUser.handle.replace(/^@/, ''));
+    const ownPosts = (Array.isArray(bootstrap?.feed) ? bootstrap.feed : []).filter(
+      (post) => post.author?.username === currentUser.handle.replace(/^@/, '') && post.mediaUrl
+    );
     if (ownPosts.length === 0) {
-      return PROFILE_POSTS;
+      return [];
     }
 
     return ownPosts.map((post, index) => ({
       id: post.id,
-      image: resolveMediaUrl(backendOrigin, post.mediaUrl, PROFILE_POSTS[index % PROFILE_POSTS.length].image),
+      image: resolveMediaUrl(backendOrigin, post.mediaUrl, ''),
       locked: post.visibility === 'private_circle',
       likes: Number(post.likeCount ?? 0),
       comments: Number(post.commentCount ?? 0),
@@ -2549,6 +2678,26 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       const trimmed = text.trim();
       if (!trimmed || !sessionRef.current || !deviceProfile) {
         return;
+      }
+
+      if (STABLE_STARTUP_MODE) {
+        const createdAt = new Date().toISOString();
+        setChatMessages((current) =>
+          [
+            ...current,
+            {
+              id: `local-${createUuid()}`,
+              conversationKey: conversation.conversationKey,
+              from: 'me' as 'me',
+              text: trimmed,
+              time: formatClockTime(createdAt),
+              createdAt,
+              reactions: [],
+              status: 'failed' as 'failed'
+            }
+          ].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+        );
+        throw new Error('Secure chat is disabled in this stable startup build while login stability is being verified.');
       }
 
       try {

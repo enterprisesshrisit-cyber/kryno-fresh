@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import dns from 'node:dns';
+import { resolve4 } from 'node:dns/promises';
 import { env } from '../config/env.js';
 
 dns.setDefaultResultOrder('ipv4first');
@@ -26,36 +27,51 @@ async function withEmailTimeout<T>(operation: Promise<T>, label: string): Promis
 }
 
 export class EmailService {
-  private readonly transporter =
-    env.SMTP_HOST && env.SMTP_PORT && env.EMAIL_FROM
-      ? nodemailer.createTransport({
-          host: env.SMTP_HOST,
-          port: env.SMTP_PORT,
-          secure: env.SMTP_SECURE ?? false,
-          family: 4,
-          connectionTimeout: 8_000,
-          greetingTimeout: 8_000,
-          socketTimeout: 12_000,
-          auth: env.SMTP_USER && env.SMTP_PASS ? { user: env.SMTP_USER, pass: env.SMTP_PASS } : undefined,
-          tls: {
-            rejectUnauthorized: env.SMTP_TLS_REJECT_UNAUTHORIZED
-          }
-        })
-      : null;
+  private transporterPromise: Promise<ReturnType<typeof nodemailer.createTransport>> | null = null;
+
+  private async getTransporter() {
+    if (!env.SMTP_HOST || !env.SMTP_PORT || !env.EMAIL_FROM) {
+      return null;
+    }
+
+    if (!this.transporterPromise) {
+      this.transporterPromise = resolve4(env.SMTP_HOST)
+        .then((addresses) => addresses[0] ?? env.SMTP_HOST)
+        .catch(() => env.SMTP_HOST)
+        .then((smtpHost) =>
+          nodemailer.createTransport({
+            host: smtpHost,
+            port: env.SMTP_PORT,
+            secure: env.SMTP_SECURE ?? false,
+            connectionTimeout: 8_000,
+            greetingTimeout: 8_000,
+            socketTimeout: 12_000,
+            auth: env.SMTP_USER && env.SMTP_PASS ? { user: env.SMTP_USER, pass: env.SMTP_PASS } : undefined,
+            tls: {
+              servername: env.SMTP_HOST,
+              rejectUnauthorized: env.SMTP_TLS_REJECT_UNAUTHORIZED
+            }
+          })
+        );
+    }
+
+    return this.transporterPromise;
+  }
 
   get hasRealTransport() {
-    return Boolean(this.transporter && env.EMAIL_FROM);
+    return Boolean(env.SMTP_HOST && env.SMTP_PORT && env.EMAIL_FROM);
   }
 
   async sendVerificationEmail(email: string, code: string): Promise<boolean> {
-    if (!this.transporter || !env.EMAIL_FROM) {
+    const transporter = await this.getTransporter();
+    if (!transporter || !env.EMAIL_FROM) {
       console.log('[EMAIL_VERIFICATION_CODE]', JSON.stringify({ email, code }));
       return false;
     }
 
     try {
       await withEmailTimeout(
-        this.transporter.sendMail({
+        transporter.sendMail({
           from: env.EMAIL_FROM,
           to: email,
           subject: 'Your KRYNO verification code',
@@ -90,14 +106,15 @@ export class EmailService {
   }
 
   async sendPasswordResetEmail(email: string, code: string): Promise<boolean> {
-    if (!this.transporter || !env.EMAIL_FROM) {
+    const transporter = await this.getTransporter();
+    if (!transporter || !env.EMAIL_FROM) {
       console.log('[PASSWORD_RESET_CODE]', JSON.stringify({ email, code }));
       return false;
     }
 
     try {
       await withEmailTimeout(
-        this.transporter.sendMail({
+        transporter.sendMail({
           from: env.EMAIL_FROM,
           to: email,
           subject: 'Your KRYNO password reset code',
@@ -146,14 +163,15 @@ export class EmailService {
     const userAgent = input.userAgent || 'unknown device/browser';
     const occurredAt = input.occurredAt.toISOString();
 
-    if (!this.transporter || !env.EMAIL_FROM) {
+    const transporter = await this.getTransporter();
+    if (!transporter || !env.EMAIL_FROM) {
       console.log('[SECURITY_ALERT_EMAIL]', JSON.stringify({ email, username: input.username, deviceName, ip, userAgent, occurredAt }));
       return false;
     }
 
     try {
       await withEmailTimeout(
-        this.transporter.sendMail({
+        transporter.sendMail({
           from: env.EMAIL_FROM,
           to: email,
           subject: 'New KRYNO login detected',

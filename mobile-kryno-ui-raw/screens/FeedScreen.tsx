@@ -8,12 +8,31 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { COLORS, FONTS, RADIUS, SPACE, TIER, MOOD, type MoodType } from '../lib/theme';
-import { FEED_POSTS } from '../lib/data';
+import { COLORS, FONTS, RADIUS, SPACE, TIER, MOOD, type MoodType, type TierType } from '../lib/theme';
 import KrynoLogo from '../components/KrynoLogo';
 import { useKrynoBackend } from '../lib/krynoBackend';
 
 const { width } = Dimensions.get('window');
+
+type FeedCardPost = {
+  id: string;
+  user: {
+    name: string;
+    handle: string;
+    avatar: string;
+    tier: TierType;
+  };
+  image: string;
+  caption: string;
+  captionKeywords: string[];
+  timeAgo: string;
+  likes: number;
+  comments: number;
+  locked: boolean;
+  mood: MoodType;
+  likedByMe?: boolean;
+  mediaKind?: 'text' | 'image' | 'video';
+};
 
 // ─── STORY BUBBLE ───────────────────────────────────────────────────────
 function StoryBubble({ story, onAddStory, disabled }: { story: any; onAddStory: () => void; disabled?: boolean }) {
@@ -64,7 +83,7 @@ function FeedCard({
   focusMode,
   onToggleLike,
 }: {
-  post: typeof FEED_POSTS[0] & { likedByMe?: boolean };
+  post: FeedCardPost;
   focusMode: boolean;
   onToggleLike: (postId: string) => void;
 }) {
@@ -75,6 +94,7 @@ function FeedCard({
   const cardScale = useRef(new Animated.Value(1)).current;
   const moodCfg = MOOD[post.mood as keyof typeof MOOD] ?? MOOD.chill;
   const tierCfg = TIER[post.user.tier as keyof typeof TIER] ?? TIER.Basic;
+  const hasMedia = typeof post.image === 'string' && post.image.trim().length > 0;
 
   React.useEffect(() => {
     setLiked(!!post.likedByMe);
@@ -134,7 +154,7 @@ function FeedCard({
         onPressOut={handlePressOut}
         style={styles.cardImageWrap}
       >
-        {post.locked ? (
+        {post.locked && hasMedia ? (
           <View style={styles.lockedContainer}>
             <Image source={{ uri: post.image }} style={StyleSheet.absoluteFill} contentFit="cover" blurRadius={18} />
             <LinearGradient colors={['rgba(5,7,15,0.5)', 'rgba(5,7,15,0.8)']} style={StyleSheet.absoluteFill} />
@@ -149,8 +169,12 @@ function FeedCard({
               </LinearGradient>
             </View>
           </View>
-        ) : (
+        ) : hasMedia ? (
           <Image source={{ uri: post.image }} style={styles.cardImage} contentFit="cover" transition={200} />
+        ) : (
+          <View style={styles.textPostMedia}>
+            <Ionicons name="document-text-outline" size={30} color={COLORS.primary} />
+          </View>
         )}
 
         {/* Gradient overlay */}
@@ -206,9 +230,10 @@ function FeedCard({
 
 // ─── MAIN SCREEN ───────────────────────────────────────────────────────────────
 export default function FeedScreen() {
-  const { feedPosts, refreshSocial, refreshing, stories, togglePostLike, createStoryFromMedia } = useKrynoBackend();
+  const { feedPosts, refreshSocial, refreshing, stories, togglePostLike, createStoryFromMedia, createPostFromMedia } = useKrynoBackend();
   const [focusMode, setFocusMode] = useState(false);
   const [storyBusy, setStoryBusy] = useState(false);
+  const [postBusy, setPostBusy] = useState(false);
   const scrollY = useRef(new Animated.Value(0)).current;
 
   const headerOpacity = scrollY.interpolate({ inputRange: [0, 60], outputRange: [1, 0], extrapolate: 'clamp' });
@@ -227,6 +252,7 @@ export default function FeedScreen() {
 
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.All,
+      base64: true,
       quality: 0.9,
       videoMaxDuration: 30
     });
@@ -242,6 +268,7 @@ export default function FeedScreen() {
         uri: asset.uri,
         fileName: asset.fileName,
         mimeType: asset.mimeType,
+        bytesBase64: asset.base64,
         caption: ''
       });
     } catch (error) {
@@ -250,6 +277,41 @@ export default function FeedScreen() {
       setStoryBusy(false);
     }
   }, [createStoryFromMedia]);
+
+  const pickPostMedia = useCallback(async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Permission needed', 'Allow photo access to publish Kryno posts.');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.All,
+      base64: true,
+      quality: 0.9,
+      videoMaxDuration: 60
+    });
+
+    if (result.canceled || !result.assets[0]) {
+      return;
+    }
+
+    try {
+      setPostBusy(true);
+      const asset = result.assets[0];
+      await createPostFromMedia({
+        uri: asset.uri,
+        fileName: asset.fileName,
+        mimeType: asset.mimeType,
+        bytesBase64: asset.base64,
+        caption: ''
+      });
+    } catch (error) {
+      Alert.alert('Post failed', error instanceof Error ? error.message : 'Post media could not be uploaded.');
+    } finally {
+      setPostBusy(false);
+    }
+  }, [createPostFromMedia]);
 
   const renderHeader = () => (
     <View>
@@ -267,9 +329,8 @@ export default function FeedScreen() {
             <Ionicons name={focusMode ? 'eye-off-outline' : 'eye-outline'} size={16} color={focusMode ? COLORS.primary : COLORS.textMuted} />
             <Text style={[styles.focusBtnText, focusMode && { color: COLORS.primary }]}>Focus</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.headerIconBtn}>
-            <Ionicons name="notifications-outline" size={20} color={COLORS.textSub} />
-            <View style={styles.notifDot} />
+          <TouchableOpacity style={styles.headerIconBtn} onPress={pickPostMedia} disabled={postBusy}>
+            <Ionicons name={postBusy ? 'cloud-upload-outline' : 'add'} size={22} color={COLORS.textSub} />
           </TouchableOpacity>
         </View>
       </Animated.View>
@@ -322,6 +383,17 @@ export default function FeedScreen() {
             />
           )}
           ListHeaderComponent={renderHeader}
+          ListEmptyComponent={
+            <View style={styles.emptyFeed}>
+              <Ionicons name="images-outline" size={34} color={COLORS.primary} />
+              <Text style={styles.emptyTitle}>No posts yet</Text>
+              <Text style={styles.emptyCopy}>Your feed will show real Kryno posts here.</Text>
+              <TouchableOpacity style={styles.emptyCta} onPress={pickPostMedia} disabled={postBusy} activeOpacity={0.85}>
+                <Ionicons name={postBusy ? 'cloud-upload-outline' : 'add'} size={17} color={COLORS.white} />
+                <Text style={styles.emptyCtaText}>{postBusy ? 'Uploading...' : 'Post photo or video'}</Text>
+              </TouchableOpacity>
+            </View>
+          }
           contentContainerStyle={styles.feedList}
           showsVerticalScrollIndicator={false}
           onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], { useNativeDriver: true })}
@@ -382,6 +454,30 @@ const styles = StyleSheet.create({
 
   // Feed list
   feedList: { paddingBottom: 100 },
+  emptyFeed: {
+    marginHorizontal: SPACE.md,
+    marginTop: SPACE.lg,
+    padding: SPACE.lg,
+    borderRadius: RADIUS.xl,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.bgCard,
+    alignItems: 'center',
+    gap: 10
+  },
+  emptyTitle: { fontSize: FONTS.lg, fontWeight: FONTS.bold, color: COLORS.text },
+  emptyCopy: { fontSize: FONTS.sm, color: COLORS.textMuted, textAlign: 'center', lineHeight: 19 },
+  emptyCta: {
+    marginTop: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.primary
+  },
+  emptyCtaText: { fontSize: FONTS.sm, color: COLORS.white, fontWeight: FONTS.bold },
 
   // Feed Card
   feedCard: {
@@ -415,6 +511,13 @@ const styles = StyleSheet.create({
   // Image
   cardImageWrap: { position: 'relative', height: width - SPACE.md * 2 - 2 },
   cardImage: { width: '100%', height: '100%' },
+  textPostMedia: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.bgSurface
+  },
   cardImageOverlay: { ...StyleSheet.absoluteFillObject },
   moodTint: { ...StyleSheet.absoluteFillObject, opacity: 0.08 },
 

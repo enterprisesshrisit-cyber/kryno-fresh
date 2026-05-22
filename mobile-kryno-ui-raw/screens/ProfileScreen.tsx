@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Animated, Dimensions, StatusBar, Alert,
+  Animated, Dimensions, StatusBar, Alert, Modal, TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -10,7 +10,7 @@ import * as ImagePicker from 'expo-image-picker';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { COLORS, FONTS, RADIUS, SPACE, MOOD, TIER, STATUS } from '../lib/theme';
 import type { MoodType, StatusType, TierType } from '../lib/theme';
-import { ME, PROFILE_POSTS, STORIES } from '../lib/data';
+import { PROFILE_POSTS } from '../lib/data';
 import GlassCard from '../components/GlassCard';
 import AuraRing from '../components/AuraRing';
 import PremiumBadge from '../components/PremiumBadge';
@@ -177,7 +177,7 @@ function PrivacyToggle({ label, icon, on, onToggle }: { label: string; icon: any
 
 // ─── MAIN SCREEN ───────────────────────────────────────────────────────────────
 export default function ProfileScreen() {
-  const { currentUser, profilePosts, stories, uploadProfilePhoto, createStoryFromMedia, createPostFromMedia } = useKrynoBackend();
+  const { currentUser, profilePosts, stories, uploadProfilePhoto, createStoryFromMedia, createPostFromMedia, saveProfile } = useKrynoBackend();
   const user = currentUser;
   const [status, setStatus] = useState<StatusType>((user.status as StatusType) || 'active');
   const [mood, setMood] = useState<MoodType>((user.mood as MoodType) || 'chill');
@@ -185,6 +185,10 @@ export default function ProfileScreen() {
   const [privacy, setPrivacy] = useState({ viewProfile: true, viewPosts: true, message: false });
   const [bioExpanded, setBioExpanded] = useState(false);
   const [mediaBusy, setMediaBusy] = useState(false);
+  const [editVisible, setEditVisible] = useState(false);
+  const [editName, setEditName] = useState(user.name);
+  const [editBio, setEditBio] = useState(user.bio);
+  const [profileBusy, setProfileBusy] = useState(false);
   const scrollY = useRef(new Animated.Value(0)).current;
 
   const moodCfg = MOOD[mood as keyof typeof MOOD] ?? MOOD.chill;
@@ -200,7 +204,41 @@ export default function ProfileScreen() {
   React.useEffect(() => {
     setStatus((user.status as StatusType) || 'active');
     setMood((user.mood as MoodType) || 'chill');
+    setEditName(user.name);
+    setEditBio(user.bio);
   }, [user.status, user.mood]);
+
+  React.useEffect(() => {
+    setEditName(user.name);
+    setEditBio(user.bio);
+  }, [user.name, user.bio]);
+
+  const openEditProfile = useCallback(() => {
+    setEditName(user.name);
+    setEditBio(user.bio);
+    setEditVisible(true);
+  }, [user.bio, user.name]);
+
+  const saveProfileEdits = useCallback(async () => {
+    const nextName = editName.trim();
+    if (!nextName) {
+      Alert.alert('Name required', 'Add a display name for your Kryno profile.');
+      return;
+    }
+
+    try {
+      setProfileBusy(true);
+      await saveProfile({
+        displayName: nextName,
+        bio: editBio.trim()
+      });
+      setEditVisible(false);
+    } catch (error) {
+      Alert.alert('Profile failed', error instanceof Error ? error.message : 'Profile could not be saved.');
+    } finally {
+      setProfileBusy(false);
+    }
+  }, [editBio, editName, saveProfile]);
 
   const pickProfilePhoto = useCallback(async () => {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -213,6 +251,7 @@ export default function ProfileScreen() {
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: true,
       aspect: [1, 1],
+      base64: true,
       quality: 0.85
     });
 
@@ -226,7 +265,8 @@ export default function ProfileScreen() {
       await uploadProfilePhoto({
         uri: asset.uri,
         fileName: asset.fileName,
-        mimeType: asset.mimeType
+        mimeType: asset.mimeType,
+        bytesBase64: asset.base64
       });
     } catch (error) {
       Alert.alert('Upload failed', error instanceof Error ? error.message : 'Profile photo could not be uploaded.');
@@ -244,6 +284,7 @@ export default function ProfileScreen() {
 
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.All,
+      base64: true,
       quality: 0.9,
       videoMaxDuration: 30
     });
@@ -259,6 +300,7 @@ export default function ProfileScreen() {
         uri: asset.uri,
         fileName: asset.fileName,
         mimeType: asset.mimeType,
+        bytesBase64: asset.base64,
         caption: ''
       });
     } catch (error) {
@@ -277,6 +319,7 @@ export default function ProfileScreen() {
 
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.All,
+      base64: true,
       quality: 0.9,
       videoMaxDuration: 60
     });
@@ -292,6 +335,7 @@ export default function ProfileScreen() {
         uri: asset.uri,
         fileName: asset.fileName,
         mimeType: asset.mimeType,
+        bytesBase64: asset.base64,
         caption: ''
       });
     } catch (error) {
@@ -303,6 +347,7 @@ export default function ProfileScreen() {
 
   const leftPosts = profilePosts.filter((_, i) => i % 2 === 0);
   const rightPosts = profilePosts.filter((_, i) => i % 2 !== 0);
+  const lockedPostsCount = profilePosts.filter((post) => post.locked).length;
 
   const headerOpacity = scrollY.interpolate({ inputRange: [0, 120], outputRange: [0, 1], extrapolate: 'clamp' });
 
@@ -416,26 +461,32 @@ export default function ProfileScreen() {
           </View>
 
           {/* Smart Bio */}
-          <TouchableOpacity onPress={() => setBioExpanded(e => !e)} style={styles.bioWrap} activeOpacity={0.85}>
-            <SmartBio bio={user.bio} keywords={user.bioKeywords} />
-            {!bioExpanded && (
-              <Text style={styles.bioReadMore}>Read more</Text>
+          <TouchableOpacity onPress={user.bio ? () => setBioExpanded(e => !e) : openEditProfile} style={styles.bioWrap} activeOpacity={0.85}>
+            {user.bio ? (
+              <>
+                <SmartBio bio={user.bio} keywords={user.bioKeywords} />
+                {!bioExpanded && (
+                  <Text style={styles.bioReadMore}>Read more</Text>
+                )}
+              </>
+            ) : (
+              <Text style={styles.emptyBioText}>Add a bio</Text>
             )}
           </TouchableOpacity>
 
           {/* Action buttons */}
           <View style={styles.actionRow}>
             <LinearGradient colors={['#6366F1', '#8B5CF6']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.followGrad}>
-              <TouchableOpacity style={styles.followInner} activeOpacity={0.85}>
-                <Text style={styles.followText}>Follow</Text>
+              <TouchableOpacity style={styles.followInner} activeOpacity={0.85} onPress={openEditProfile}>
+                <Text style={styles.followText}>Edit Profile</Text>
               </TouchableOpacity>
             </LinearGradient>
-            <TouchableOpacity style={styles.msgBtn} activeOpacity={0.8}>
-              <Ionicons name="chatbubble-outline" size={16} color={COLORS.primary} />
-              <Text style={styles.msgBtnText}>Message</Text>
+            <TouchableOpacity style={styles.msgBtn} activeOpacity={0.8} onPress={pickStoryMedia} disabled={mediaBusy}>
+              <Ionicons name="add-circle-outline" size={16} color={COLORS.primary} />
+              <Text style={styles.msgBtnText}>Story</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.moreBtn} activeOpacity={0.8}>
-              <Ionicons name="bookmark-outline" size={17} color={COLORS.textMuted} />
+            <TouchableOpacity style={styles.moreBtn} activeOpacity={0.8} onPress={pickPostMedia} disabled={mediaBusy}>
+              <Ionicons name={mediaBusy ? 'cloud-upload-outline' : 'image-outline'} size={17} color={COLORS.textMuted} />
             </TouchableOpacity>
           </View>
         </View>
@@ -498,7 +549,7 @@ export default function ProfileScreen() {
             </ScrollView>
           </View>
 
-          {/* Inner Circle CTA */}
+          {lockedPostsCount > 0 && (
           <TouchableOpacity activeOpacity={0.9}>
             <LinearGradient
               colors={['rgba(99,102,241,0.22)', 'rgba(6,182,212,0.1)', 'rgba(139,92,246,0.15)']}
@@ -511,7 +562,7 @@ export default function ProfileScreen() {
                 </View>
                 <View>
                   <Text style={styles.innerCircleTitle}>Inner Circle Content</Text>
-                  <Text style={styles.innerCircleSub}>3 posts locked for IC members</Text>
+                  <Text style={styles.innerCircleSub}>{lockedPostsCount} locked {lockedPostsCount === 1 ? 'post' : 'posts'}</Text>
                 </View>
               </View>
               <LinearGradient colors={['#6366F1', '#8B5CF6']} style={styles.unlockBtn}>
@@ -519,12 +570,14 @@ export default function ProfileScreen() {
               </LinearGradient>
             </LinearGradient>
           </TouchableOpacity>
+          )}
 
-          {/* Profile Vibe Music */}
+          {user.music.title ? (
           <View>
             <Text style={styles.sectionLabel}>Profile Vibe</Text>
             <MiniMusicBar title={user.music.title} artist={user.music.artist} progress={user.music.progress} />
           </View>
+          ) : null}
 
           {/* Mood System */}
           <GlassCard style={styles.card}>
@@ -568,7 +621,7 @@ export default function ProfileScreen() {
             </View>
           </GlassCard>
 
-          {/* Interests */}
+          {user.interests.length > 0 && (
           <GlassCard style={styles.card}>
             <Text style={styles.cardTitle}>Interests</Text>
             <View style={styles.tagsRow}>
@@ -579,8 +632,9 @@ export default function ProfileScreen() {
               ))}
             </View>
           </GlassCard>
+          )}
 
-          {/* Identity Tags */}
+          {user.identityTags.length > 0 && (
           <GlassCard style={styles.card}>
             <Text style={styles.cardTitle}>Digital Identity</Text>
             <View style={styles.tagsRow}>
@@ -591,6 +645,7 @@ export default function ProfileScreen() {
               ))}
             </View>
           </GlassCard>
+          )}
 
           {/* Private Mode Controls */}
           <GlassCard style={styles.card}>
@@ -628,19 +683,58 @@ export default function ProfileScreen() {
                 <Ionicons name={mediaBusy ? 'cloud-upload-outline' : 'add'} size={17} color={COLORS.primary} />
               </TouchableOpacity>
             </View>
-            <View style={styles.postsGrid}>
-              <View style={styles.postsCol}>
-                {leftPosts.map(p => <PostCard key={p.id} post={p} />)}
+            {profilePosts.length > 0 ? (
+              <View style={styles.postsGrid}>
+                <View style={styles.postsCol}>
+                  {leftPosts.map(p => <PostCard key={p.id} post={p} />)}
+                </View>
+                <View style={styles.postsCol}>
+                  {rightPosts.map(p => <PostCard key={p.id} post={p} />)}
+                </View>
               </View>
-              <View style={styles.postsCol}>
-                {rightPosts.map(p => <PostCard key={p.id} post={p} />)}
-              </View>
-            </View>
+            ) : (
+              <TouchableOpacity style={styles.emptyPosts} onPress={pickPostMedia} disabled={mediaBusy} activeOpacity={0.85}>
+                <Ionicons name="images-outline" size={30} color={COLORS.primary} />
+                <Text style={styles.emptyPostsTitle}>No posts yet</Text>
+                <Text style={styles.emptyPostsCopy}>Add your first photo or video.</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           <View style={{ height: 100 }} />
         </View>
       </Animated.ScrollView>
+
+      <Modal visible={editVisible} transparent animationType="fade" onRequestClose={() => setEditVisible(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.editSheet}>
+            <View style={styles.editHeader}>
+              <Text style={styles.editTitle}>Edit Profile</Text>
+              <TouchableOpacity onPress={() => setEditVisible(false)} style={styles.editClose}>
+                <Ionicons name="close" size={18} color={COLORS.textSub} />
+              </TouchableOpacity>
+            </View>
+            <TextInput
+              value={editName}
+              onChangeText={setEditName}
+              placeholder="Display name"
+              placeholderTextColor={COLORS.textMuted}
+              style={styles.editInput}
+            />
+            <TextInput
+              value={editBio}
+              onChangeText={setEditBio}
+              placeholder="Bio"
+              placeholderTextColor={COLORS.textMuted}
+              style={[styles.editInput, styles.editBioInput]}
+              multiline
+            />
+            <TouchableOpacity style={styles.saveProfileBtn} onPress={saveProfileEdits} disabled={profileBusy} activeOpacity={0.85}>
+              <Text style={styles.saveProfileText}>{profileBusy ? 'Saving...' : 'Save profile'}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -685,6 +779,7 @@ const styles = StyleSheet.create({
   bioText: { fontSize: FONTS.base, color: COLORS.textSub, textAlign: 'center', lineHeight: 24, letterSpacing: 0.1 },
   bioKeyword: { color: COLORS.primaryLight, fontWeight: FONTS.semibold },
   bioReadMore: { fontSize: FONTS.sm, color: COLORS.primary, textAlign: 'center', marginTop: 4, fontWeight: FONTS.medium },
+  emptyBioText: { fontSize: FONTS.base, color: COLORS.primary, textAlign: 'center', fontWeight: FONTS.semibold },
 
   // Actions
   actionRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
@@ -788,4 +883,55 @@ const styles = StyleSheet.create({
   postHoverOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'flex-end', padding: 8 },
   postStats: { flexDirection: 'row', alignItems: 'center' },
   postStat: { fontSize: FONTS.xs, color: COLORS.white, fontWeight: FONTS.semibold, marginLeft: 3 },
+  emptyPosts: {
+    minHeight: 150,
+    borderRadius: RADIUS.xl,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.bgCard,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    padding: SPACE.lg
+  },
+  emptyPostsTitle: { fontSize: FONTS.base, color: COLORS.text, fontWeight: FONTS.bold },
+  emptyPostsCopy: { fontSize: FONTS.sm, color: COLORS.textMuted, textAlign: 'center' },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: SPACE.md
+  },
+  editSheet: {
+    width: '100%',
+    borderRadius: RADIUS.xl,
+    backgroundColor: COLORS.bgSurface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: SPACE.md,
+    gap: 12
+  },
+  editHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  editTitle: { fontSize: FONTS.lg, color: COLORS.text, fontWeight: FONTS.bold },
+  editClose: { width: 34, height: 34, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.bgGlass },
+  editInput: {
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.bgMid,
+    color: COLORS.text,
+    fontSize: FONTS.base,
+    paddingHorizontal: 14,
+    paddingVertical: 12
+  },
+  editBioInput: { minHeight: 110, textAlignVertical: 'top' },
+  saveProfileBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.primary,
+    paddingVertical: 13
+  },
+  saveProfileText: { color: COLORS.white, fontSize: FONTS.base, fontWeight: FONTS.bold },
 });

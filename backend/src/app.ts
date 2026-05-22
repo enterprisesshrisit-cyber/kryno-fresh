@@ -211,7 +211,7 @@ export async function buildApp() {
   await app.register(async (instance) => {
     await instance.register(rateLimit, {
       ...rateLimitStoreOptions,
-      max: 120,
+      max: env.APP_ENV === 'production' ? 600 : 1000,
       timeWindow: '1 minute'
     });
     await instance.register(socialRoutes, { prefix: '/api/social' });

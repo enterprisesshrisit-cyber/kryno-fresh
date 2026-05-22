@@ -367,7 +367,7 @@ function MessageBubble({
       { opacity: fadeAnim, transform: [{ translateX: slideAnim }, { scale: scaleAnim }] },
     ]}>
       {!isMe && (
-        <Image source={{ uri: 'https://i.pravatar.cc/100?img=47' }} style={styles.msgAvatar} contentFit="cover" />
+        <Image source={{ uri: 'https://api.dicebear.com/9.x/initials/png?seed=KRYNO&backgroundColor=111827&fontColor=e5e7eb' }} style={styles.msgAvatar} contentFit="cover" />
       )}
 
       <View style={[styles.msgBubbleWrap, isMe && styles.msgBubbleWrapMe]}>
@@ -455,7 +455,7 @@ function TypingIndicator() {
 
   return (
     <Animated.View style={[styles.typingWrap, { opacity: wrapFade }]}>
-      <Image source={{ uri: 'https://i.pravatar.cc/100?img=47' }} style={styles.typingAvatar} contentFit="cover" />
+      <Image source={{ uri: 'https://api.dicebear.com/9.x/initials/png?seed=KRYNO&backgroundColor=111827&fontColor=e5e7eb' }} style={styles.typingAvatar} contentFit="cover" />
       <View style={styles.typingBubble}>
         {[d0, d1, d2].map((dot, i) => (
           <Animated.View key={i} style={[styles.typingDot, { transform: [{ translateY: dot }] }]} />
@@ -470,9 +470,12 @@ export default function ChatScreen({ route, navigation }: any) {
   const { getConversationMessages, sendConversationMessage, markConversationRead, startConversationCall } = useKrynoBackend();
   const convo = route?.params?.conversation || {
     user: {
-      name: 'Zara Khan', handle: '@zara.k',
-      avatar: 'https://i.pravatar.cc/100?img=47',
-      tier: 'Inner Circle', online: true, mood: 'chill',
+      name: 'Kryno User',
+      handle: '@kryno',
+      avatar: 'https://api.dicebear.com/9.x/initials/png?seed=KRYNO&backgroundColor=111827&fontColor=e5e7eb',
+      tier: 'Basic',
+      online: false,
+      mood: 'chill'
     },
   };
   const conversationKey =

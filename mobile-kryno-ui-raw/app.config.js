@@ -21,5 +21,13 @@ module.exports = () => {
     throw new Error('Production mobile builds must use a permanent HTTPS API URL, not localhost or trycloudflare.');
   }
 
-  return expo;
+  return {
+    ...expo,
+    updates: {
+      ...expo.updates,
+      enabled: false,
+      checkAutomatically: 'NEVER',
+      fallbackToCacheTimeout: 0
+    }
+  };
 };
