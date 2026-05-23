@@ -160,7 +160,16 @@ type FeedPostModel = typeof FEED_POSTS[number] & {
   commentItems?: SocialPost['comments'];
 };
 
-type StoryModel = typeof STORIES[number];
+type StoryModel = typeof STORIES[number] & {
+  username?: string;
+  mediaUrl?: string;
+  mediaMimeType?: string;
+  caption?: string;
+  viewedByMe?: boolean;
+  viewCount?: number;
+  expiresAt?: string;
+  createdAt?: string;
+};
 type MeModel = typeof ME;
 type FeaturedMemberModel = typeof FEATURED_MEMBERS[number] & {
   isFollowing?: boolean;
@@ -345,6 +354,7 @@ type KrynoBackendContextValue = {
     bytesBase64?: string | null;
     caption?: string;
   }) => Promise<void>;
+  viewStory: (storyId: string) => Promise<void>;
 };
 
 const SESSION_STORAGE_KEY = 'kryno_mobile_auth_session';
@@ -2574,6 +2584,33 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     [apiFetch, loadSocialState, uploadSocialMedia]
   );
 
+  const viewStory = useCallback(
+    async (storyId: string) => {
+      if (!storyId || storyId === 'add-story') {
+        return;
+      }
+
+      const updated = await apiFetch<SocialStory | null>(`/social/stories/${encodeURIComponent(storyId)}/view`, {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+
+      if (!updated) {
+        return;
+      }
+
+      setBootstrap((current) =>
+        current
+          ? {
+              ...current,
+              stories: current.stories.map((story) => (story.id === updated.id ? updated : story))
+            }
+          : current
+      );
+    },
+    [apiFetch]
+  );
+
   const createPostFromMedia = useCallback(
     async (input: MediaUploadInput & { caption?: string }) => {
       const media = await uploadSocialMedia('post', input);
@@ -2706,11 +2743,19 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
             label: displayName.split(/\s+/)[0] || username,
             isAdd: false,
             gradient: STORIES[(index % (STORIES.length - 1)) + 1]?.gradient ?? ['#6366F1', '#8B5CF6'],
-            avatar: fallbackAvatar(username, story.author.avatarUrl)
+            avatar: fallbackAvatar(username, story.author.avatarUrl),
+            username,
+            mediaUrl: resolveMediaUrl(backendOrigin, story.mediaUrl, ''),
+            mediaMimeType: story.mediaMimeType,
+            caption: story.caption || '',
+            viewedByMe: Boolean(story.viewedByMe),
+            viewCount: Number(story.viewCount ?? 0),
+            expiresAt: story.expiresAt,
+            createdAt: story.createdAt
           };
         })
     ];
-  }, [bootstrap]);
+  }, [backendOrigin, bootstrap]);
 
   const featuredMembers = useMemo<FeaturedMemberModel[]>(() => {
     const liveSuggestions = Array.isArray(bootstrap?.suggestions) ? bootstrap.suggestions : [];
@@ -2923,7 +2968,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       uploadProfilePhoto,
       createPostFromMedia,
       createTextPost,
-      createStoryFromMedia
+      createStoryFromMedia,
+      viewStory
     }),
     [
       initialized,
@@ -2975,7 +3021,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       uploadProfilePhoto,
       createPostFromMedia,
       createTextPost,
-      createStoryFromMedia
+      createStoryFromMedia,
+      viewStory
     ]
   );
 

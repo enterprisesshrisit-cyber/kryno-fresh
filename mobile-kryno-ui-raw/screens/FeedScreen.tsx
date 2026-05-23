@@ -13,6 +13,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { COLORS, FONTS, RADIUS, SPACE, TIER, MOOD, type MoodType, type TierType } from '../lib/theme';
 import KrynoLogo from '../components/KrynoLogo';
 import { useKrynoBackend } from '../lib/krynoBackend';
+import StoryViewerModal from '../components/StoryViewerModal';
 
 const { width } = Dimensions.get('window');
 
@@ -66,7 +67,17 @@ function formatCommentTime(value?: string) {
 }
 
 // ─── STORY BUBBLE ───────────────────────────────────────────────────────
-function StoryBubble({ story, onAddStory, disabled }: { story: any; onAddStory: () => void; disabled?: boolean }) {
+function StoryBubble({
+  story,
+  onAddStory,
+  onOpenStory,
+  disabled
+}: {
+  story: any;
+  onAddStory: () => void;
+  onOpenStory: (storyId: string) => void;
+  disabled?: boolean;
+}) {
   const scale = useRef(new Animated.Value(1)).current;
   const storyGradient = Array.isArray(story?.gradient) && story.gradient.length >= 2
     ? story.gradient
@@ -78,6 +89,7 @@ function StoryBubble({ story, onAddStory, disabled }: { story: any; onAddStory: 
       return;
     }
 
+    onOpenStory(story.id);
     Animated.sequence([
       Animated.timing(scale, { toValue: 0.9, duration: 100, useNativeDriver: true }),
       Animated.spring(scale, { toValue: 1, useNativeDriver: true, tension: 150 }),
@@ -283,7 +295,8 @@ export default function FeedScreen() {
     commentOnPost,
     deletePost,
     createStoryFromMedia,
-    createPostFromMedia
+    createPostFromMedia,
+    viewStory
   } = useKrynoBackend();
   const navigation = useNavigation<any>();
   const [focusMode, setFocusMode] = useState(false);
@@ -293,6 +306,7 @@ export default function FeedScreen() {
   const [commentText, setCommentText] = useState('');
   const [commentBusy, setCommentBusy] = useState(false);
   const [menuPost, setMenuPost] = useState<FeedCardPost | null>(null);
+  const [storyViewerId, setStoryViewerId] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const scrollY = useRef(new Animated.Value(0)).current;
 
@@ -483,7 +497,14 @@ export default function FeedScreen() {
             horizontal
             showsHorizontalScrollIndicator={false}
             keyExtractor={i => i.id}
-            renderItem={({ item }) => <StoryBubble story={item} onAddStory={addStory} disabled={storyBusy} />}
+            renderItem={({ item }) => (
+              <StoryBubble
+                story={item}
+                onAddStory={addStory}
+                onOpenStory={setStoryViewerId}
+                disabled={storyBusy}
+              />
+            )}
             contentContainerStyle={styles.storiesContent}
           />
         </View>
@@ -664,6 +685,14 @@ export default function FeedScreen() {
           </View>
         </TouchableOpacity>
       </Modal>
+
+      <StoryViewerModal
+        visible={!!storyViewerId}
+        stories={stories}
+        initialStoryId={storyViewerId}
+        onClose={() => setStoryViewerId(null)}
+        onMarkViewed={viewStory}
+      />
     </View>
   );
 }

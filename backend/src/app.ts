@@ -28,6 +28,7 @@ export async function buildApp() {
   initObservability();
   const rateLimitRedis = getRateLimitRedisClient();
   const rateLimitStoreOptions = rateLimitRedis ? { redis: rateLimitRedis as never } : {};
+  const mediaBodyLimit = Math.max(35 * 1024 * 1024, Math.ceil(env.MAX_SOCIAL_MEDIA_BYTES * 1.4) + 1024 * 1024);
 
   const app = Fastify({
     logger: {
@@ -47,7 +48,7 @@ export async function buildApp() {
       }
     },
     trustProxy: true,
-    bodyLimit: 25 * 1024 * 1024
+    bodyLimit: mediaBodyLimit
   });
   const frontendDistCandidates = [resolve(process.cwd(), '..', 'dist'), resolve(process.cwd(), 'dist')];
   const frontendDist = frontendDistCandidates.find((candidate) => existsSync(candidate));
@@ -90,7 +91,7 @@ export async function buildApp() {
 
   await app.register(multipart, {
     limits: {
-      fileSize: 15 * 1024 * 1024,
+      fileSize: env.MAX_SOCIAL_MEDIA_BYTES,
       files: 1
     }
   });

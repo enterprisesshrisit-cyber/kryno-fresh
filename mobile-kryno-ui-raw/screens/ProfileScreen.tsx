@@ -17,6 +17,7 @@ import GlassCard from '../components/GlassCard';
 import AuraRing from '../components/AuraRing';
 import PremiumBadge from '../components/PremiumBadge';
 import MiniMusicBar from '../components/MiniMusicBar';
+import StoryViewerModal from '../components/StoryViewerModal';
 import { useKrynoBackend } from '../lib/krynoBackend';
 
 const { width } = Dimensions.get('window');
@@ -25,8 +26,13 @@ const COL_W = (width - SPACE.md * 2 - COL_GAP) / 2;
 
 // ─── STAT ITEM (animated count-up) ──────────────────────────────────────────────────────
 function StatItem({ label, value }: { label: string; value: number }) {
-  const [displayed, setDisplayed] = useState(0);
+  const [displayed, setDisplayed] = useState(value);
   const started = useRef(false);
+
+  React.useEffect(() => {
+    started.current = false;
+    setDisplayed(value);
+  }, [value]);
 
   const startCount = useCallback(() => {
     if (started.current) return;
@@ -179,7 +185,16 @@ function PrivacyToggle({ label, icon, on, onToggle }: { label: string; icon: any
 
 // ─── MAIN SCREEN ───────────────────────────────────────────────────────────────
 export default function ProfileScreen() {
-  const { currentUser, profilePosts, stories, uploadProfilePhoto, createStoryFromMedia, createPostFromMedia, saveProfile } = useKrynoBackend();
+  const {
+    currentUser,
+    profilePosts,
+    stories,
+    uploadProfilePhoto,
+    createStoryFromMedia,
+    createPostFromMedia,
+    saveProfile,
+    viewStory
+  } = useKrynoBackend();
   const navigation = useNavigation<any>();
   const user = currentUser;
   const [status, setStatus] = useState<StatusType>((user.status as StatusType) || 'active');
@@ -192,6 +207,7 @@ export default function ProfileScreen() {
   const [editName, setEditName] = useState(user.name);
   const [editBio, setEditBio] = useState(user.bio);
   const [profileBusy, setProfileBusy] = useState(false);
+  const [storyViewerId, setStoryViewerId] = useState<string | null>(null);
   const scrollY = useRef(new Animated.Value(0)).current;
 
   const moodCfg = MOOD[mood as keyof typeof MOOD] ?? MOOD.chill;
@@ -559,7 +575,7 @@ export default function ProfileScreen() {
                         return;
                       }
 
-                      Alert.alert('Story', `${s.label}'s story is active.`);
+                      setStoryViewerId(s.id);
                     }}
                   >
                     <LinearGradient colors={s.gradient as any} style={styles.storyRing}>
@@ -769,6 +785,14 @@ export default function ProfileScreen() {
           </View>
         </View>
       </Modal>
+
+      <StoryViewerModal
+        visible={!!storyViewerId}
+        stories={stories}
+        initialStoryId={storyViewerId}
+        onClose={() => setStoryViewerId(null)}
+        onMarkViewed={viewStory}
+      />
     </View>
   );
 }

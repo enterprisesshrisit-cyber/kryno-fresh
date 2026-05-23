@@ -19,6 +19,12 @@ allprojects {
     maven { url 'https://www.jitpack.io' }
     maven { url("$rootDir/../node_modules/@react-native-async-storage/async-storage/android/local_repo") }
   }
+
+  configurations.configureEach {
+    resolutionStrategy {
+      force 'org.bouncycastle:bcprov-jdk15to18:1.81'
+    }
+  }
 }
 
 apply plugin: "expo-root-project"
