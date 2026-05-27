@@ -646,8 +646,9 @@ export default function FeedScreen() {
       </Modal>
 
       <Modal visible={!!menuPost} transparent animationType="fade" onRequestClose={closeMenu}>
-        <TouchableOpacity style={styles.menuBackdrop} activeOpacity={1} onPress={closeMenu}>
-          <View style={styles.menuSheet}>
+        <View style={styles.menuBackdrop}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={closeMenu} />
+          <View style={styles.menuSheet} onStartShouldSetResponder={() => true}>
             <Text style={styles.menuTitle}>Post options</Text>
             <TouchableOpacity
               style={styles.menuAction}
@@ -683,7 +684,7 @@ export default function FeedScreen() {
               <Text style={styles.menuCancelText}>Cancel</Text>
             </TouchableOpacity>
           </View>
-        </TouchableOpacity>
+        </View>
       </Modal>
 
       <StoryViewerModal

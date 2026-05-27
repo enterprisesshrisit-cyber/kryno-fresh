@@ -41,7 +41,7 @@ services:
       - key: ALLOW_DEV_EMAIL_TOKEN_PREVIEW
         value: false
       - key: EMAIL_PROVIDER
-        value: smtp
+        value: resend
       - key: SMTP_TLS_REJECT_UNAUTHORIZED
         value: true
       - key: REDIS_TLS

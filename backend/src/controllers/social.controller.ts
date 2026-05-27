@@ -3,6 +3,7 @@ import { MultipartFile } from '@fastify/multipart';
 import { z } from 'zod';
 import { AppError } from '../utils/errors.js';
 import { socialService } from '../services/social.service.js';
+import { decodeBase64TransportPayload } from '../utils/media.js';
 
 const mediaUploadSchema = z.object({
   kind: z.enum(['avatar', 'post', 'story']),
@@ -58,18 +59,6 @@ function getFieldString(fields: MediaUploadFieldMap, key: string) {
   return typeof value === 'string' ? value : undefined;
 }
 
-function parseBase64(value: string) {
-  try {
-    const bytes = Buffer.from(value, 'base64');
-    if (bytes.byteLength === 0) {
-      throw new Error('empty');
-    }
-    return bytes;
-  } catch {
-    throw new AppError(400, 'Media payload must be valid base64.', 'INVALID_MEDIA_PAYLOAD');
-  }
-}
-
 export async function socialBootstrapController(request: FastifyRequest, reply: FastifyReply) {
   const result = await socialService.getBootstrap(request.auth.userId);
   return reply.code(200).send(result);
@@ -93,11 +82,15 @@ export async function uploadMediaController(request: FastifyRequest, reply: Fast
       throw new AppError(400, 'Media file is required.', 'MISSING_SOCIAL_MEDIA_FILE');
     }
 
-    const fields = mediaUploadFieldsSchema.parse({
+    const fieldsResult = mediaUploadFieldsSchema.safeParse({
       kind: getFieldString(values, 'kind'),
       fileName: getFieldString(values, 'fileName') ?? media.filename,
       mimeType: getFieldString(values, 'mimeType') ?? media.mimetype
     });
+    if (!fieldsResult.success) {
+      throw new AppError(400, 'Media metadata is missing. Please choose the file again.', 'INVALID_SOCIAL_MEDIA_FIELDS');
+    }
+    const fields = fieldsResult.data;
     const bytes = await media.toBuffer();
 
     if (bytes.byteLength === 0) {
@@ -114,13 +107,17 @@ export async function uploadMediaController(request: FastifyRequest, reply: Fast
     return reply.code(201).send(result);
   }
 
-  const body = mediaUploadSchema.parse(request.body ?? {});
+  const bodyResult = mediaUploadSchema.safeParse(request.body ?? {});
+  if (!bodyResult.success) {
+    throw new AppError(400, 'Media upload data is incomplete. Please choose the file again.', 'INVALID_SOCIAL_MEDIA_PAYLOAD');
+  }
+  const body = bodyResult.data;
   const result = await socialService.uploadMedia({
     userId: request.auth.userId,
     kind: body.kind,
     fileName: body.fileName,
     mimeType: body.mimeType,
-    bytes: parseBase64(body.bytesBase64)
+    bytes: decodeBase64TransportPayload(body.bytesBase64)
   });
   return reply.code(201).send(result);
 }

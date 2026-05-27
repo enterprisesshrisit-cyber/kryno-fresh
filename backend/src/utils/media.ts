@@ -76,6 +76,26 @@ export function inferTrustedMediaMimeType(bytes: Buffer) {
   return null;
 }
 
+export function decodeBase64TransportPayload(value: string) {
+  const normalized = value
+    .replace(/^data:[^;]+;base64,/i, '')
+    .replace(/\s+/g, '');
+
+  if (!normalized || normalized.length % 4 === 1 || /[^A-Za-z0-9+/=]/.test(normalized)) {
+    throw new AppError(400, 'Media payload must be valid base64.', 'INVALID_MEDIA_PAYLOAD');
+  }
+
+  try {
+    const bytes = Buffer.from(normalized, 'base64');
+    if (bytes.byteLength === 0) {
+      throw new Error('empty');
+    }
+    return bytes;
+  } catch {
+    throw new AppError(400, 'Media payload must be valid base64.', 'INVALID_MEDIA_PAYLOAD');
+  }
+}
+
 export function assertTrustedMediaPayload(mimeType: string, bytes: Buffer) {
   if (bytes.byteLength === 0) {
     throw new AppError(400, 'Media payload is empty.', 'EMPTY_MEDIA_PAYLOAD');

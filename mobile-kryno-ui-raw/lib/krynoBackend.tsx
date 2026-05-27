@@ -3,20 +3,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as FileSystem from 'expo-file-system/legacy';
 import { DISCOVER_CATEGORIES, DISCOVER_POSTS, FEATURED_MEMBERS, FEED_POSTS, ME, PROFILE_POSTS, STORIES } from './data';
-import {
-  addMobileIceCandidate,
-  applyMobileAnswer,
-  applyMobileOffer,
-  createMobileCallPeerConnection,
-  getMobileFallbackIceServers,
-  requestMobileCallMedia,
-  setMobileCameraEnabled,
-  setMobileMicrophoneMuted,
-  setMobileRuntimeIceServers,
-  stopMobileMediaStream,
-  type MobileCallMode,
-  type MobileIceConfig
-} from './mobileCall';
+import type { MobileCallMode, MobileIceConfig } from './mobileCall';
+
+type MobileCallRuntime = typeof import('./mobileCall');
 
 type AuthUser = {
   id: string;
@@ -365,7 +354,7 @@ const MOBILE_CHAT_THREADS_STORAGE_KEY = 'kryno_mobile_chat_threads_v1';
 const MOBILE_CHAT_KNOWN_USERS_STORAGE_KEY = 'kryno_mobile_chat_known_users_v1';
 const MOBILE_CHAT_SEEN_INBOX_STORAGE_KEY = 'kryno_mobile_chat_seen_inbox_v1';
 const MOBILE_STORAGE_SCHEMA_KEY = 'kryno_mobile_storage_schema_version';
-const MOBILE_STORAGE_SCHEMA_VERSION = '2026-05-27-calls-enabled-v1';
+const MOBILE_STORAGE_SCHEMA_VERSION = '2026-05-27-startup-safe-v3';
 const RESET_ON_SCHEMA_CHANGE_KEYS = [
   MOBILE_CHAT_MESSAGES_STORAGE_KEY,
   MOBILE_CHAT_THREADS_STORAGE_KEY,
@@ -444,8 +433,12 @@ function resolveMediaUrl(backendOrigin: string, mediaUrl: string | null | undefi
   return `${backendOrigin}${mediaUrl.startsWith('/') ? mediaUrl : `/${mediaUrl}`}`;
 }
 
+function normalizeBase64MediaPayload(value?: string | null) {
+  return value?.replace(/^data:[^;]+;base64,/i, '').replace(/\s+/g, '') ?? '';
+}
+
 function sniffBase64MediaMimeType(value?: string | null) {
-  const normalized = value?.replace(/^data:([^;]+);base64,/, '').replace(/\s+/g, '') ?? '';
+  const normalized = normalizeBase64MediaPayload(value);
   if (!normalized) {
     return '';
   }
@@ -745,6 +738,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const knownUsersRef = useRef<Record<string, KnownChatUser>>({});
   const relayHandleRef = useRef<RelayHandle | null>(null);
   const currentCallRef = useRef<CallStateModel | null>(null);
+  const mobileCallRuntimeRef = useRef<MobileCallRuntime | null>(null);
   const handleRelayCallEventRef = useRef<((event: any) => Promise<void>) | null>(null);
   const localCallStreamRef = useRef<any | null>(null);
   const remoteCallStreamRef = useRef<any | null>(null);
@@ -752,6 +746,16 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const peerConnectionCallIdRef = useRef<string | null>(null);
   const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const pendingCallMediaKeysRef = useRef<Map<string, MobileSignalCallMediaKey>>(new Map());
+
+  const loadMobileCallRuntime = useCallback(async () => {
+    if (!mobileCallRuntimeRef.current) {
+      console.log('[KrynoStartup] call service loading');
+      mobileCallRuntimeRef.current = await import('./mobileCall');
+      console.log('[KrynoStartup] call service initialized');
+    }
+
+    return mobileCallRuntimeRef.current;
+  }, []);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -876,8 +880,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     peerConnectionRef.current = null;
     peerConnectionCallIdRef.current = null;
     pendingIceCandidatesRef.current.clear();
-    stopMobileMediaStream(localCallStreamRef.current);
-    stopMobileMediaStream(remoteCallStreamRef.current);
+    localCallStreamRef.current?.getTracks?.().forEach((track: any) => track.stop?.());
+    remoteCallStreamRef.current?.getTracks?.().forEach((track: any) => track.stop?.());
     localCallStreamRef.current = null;
     remoteCallStreamRef.current = null;
     setLocalCallStreamUrl(null);
@@ -894,45 +898,49 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     const queued = pendingIceCandidatesRef.current.get(callId) ?? [];
     pendingIceCandidatesRef.current.delete(callId);
 
+    const mobileCall = await loadMobileCallRuntime();
     for (const candidate of queued) {
-      await addMobileIceCandidate(peer, candidate);
+      await mobileCall.addMobileIceCandidate(peer, candidate);
     }
-  }, []);
+  }, [loadMobileCallRuntime]);
 
   const fetchIceConfig = useCallback(async () => {
+    const mobileCall = await loadMobileCallRuntime();
+
     try {
       const iceConfig = await apiFetch<MobileIceConfig>('/calls/ice-config');
-      const nextIceServers = iceConfig.iceServers?.length ? iceConfig.iceServers : getMobileFallbackIceServers();
-      setMobileRuntimeIceServers(nextIceServers);
+      const nextIceServers = iceConfig.iceServers?.length ? iceConfig.iceServers : mobileCall.getMobileFallbackIceServers();
+      mobileCall.setMobileRuntimeIceServers(nextIceServers);
       return nextIceServers;
     } catch {
-      const fallback = getMobileFallbackIceServers();
-      setMobileRuntimeIceServers(fallback);
+      const fallback = mobileCall.getMobileFallbackIceServers();
+      mobileCall.setMobileRuntimeIceServers(fallback);
       return fallback;
     }
-  }, [apiFetch]);
+  }, [apiFetch, loadMobileCallRuntime]);
 
   const prepareLocalCallMedia = useCallback(
     async (mode: MobileCallMode, muted: boolean, cameraEnabled: boolean) => {
+      const mobileCall = await loadMobileCallRuntime();
       let stream = localCallStreamRef.current;
       const hasVideo = stream?.getVideoTracks?.().length ?? 0;
       const needsVideo = mode === 'video';
 
       if (!stream || (needsVideo && hasVideo === 0)) {
-        stopMobileMediaStream(stream);
-        stream = await requestMobileCallMedia(mode);
+        mobileCall.stopMobileMediaStream(stream);
+        stream = await mobileCall.requestMobileCallMedia(mode);
         localCallStreamRef.current = stream;
         setLocalCallStreamUrl(stream.toURL());
       }
 
-      setMobileMicrophoneMuted(stream, muted);
+      mobileCall.setMobileMicrophoneMuted(stream, muted);
       if (mode === 'video') {
-        setMobileCameraEnabled(stream, cameraEnabled);
+        mobileCall.setMobileCameraEnabled(stream, cameraEnabled);
       }
 
       return stream;
     },
-    []
+    [loadMobileCallRuntime]
   );
 
   const ensurePeerConnection = useCallback(
@@ -949,7 +957,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       teardownCallMedia();
       await fetchIceConfig();
 
-      const peer = createMobileCallPeerConnection({
+      const mobileCall = await loadMobileCallRuntime();
+      const peer = mobileCall.createMobileCallPeerConnection({
         localStream,
         onIceCandidate: (candidate) => {
           relayHandleRef.current?.send({
@@ -993,7 +1002,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       peerConnectionCallIdRef.current = callId;
       return peer;
     },
-    [fetchIceConfig, teardownCallMedia]
+    [fetchIceConfig, loadMobileCallRuntime, teardownCallMedia]
   );
 
   const ingestSignalMessages = useCallback(
@@ -1331,6 +1340,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
     const hydrate = async () => {
       try {
+        console.log('[KrynoStartup] storage init start');
         await migrateMobileStartupStorage();
         const [storedOrigin, storedSession, nextDeviceProfile, cachedMessages, cachedThreads, cachedUsers, cachedSeenInbox] = await Promise.all([
           AsyncStorage.getItem(BACKEND_ORIGIN_STORAGE_KEY),
@@ -1364,15 +1374,25 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         knownUsersRef.current = safeUsers;
         setSeenInboxMessageIds(safeSeenInbox);
         seenInboxRef.current = new Set(safeSeenInbox);
+        console.log('[KrynoStartup] storage initialized', {
+          hasStoredSession: !!storedSession,
+          cachedMessages: safeMessages.length,
+          cachedThreads: safeThreads.length
+        });
 
         if (storedSession) {
           const parsedSession = JSON.parse(storedSession) as AuthSession;
           setSession(parsedSession);
           sessionRef.current = parsedSession;
         }
+        console.log('[KrynoStartup] auth state loaded', storedSession ? 'authenticated' : 'signed_out');
       } catch (hydrateError) {
         if (mounted) {
           setError(hydrateError instanceof Error ? hydrateError.message : 'Unable to start Kryno mobile.');
+          console.warn(
+            '[KrynoStartup] auth state load failed',
+            hydrateError instanceof Error ? hydrateError.message : 'unknown'
+          );
         }
       } finally {
         if (mounted) {
@@ -2026,9 +2046,10 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           const remoteSessionId = activeCall.remoteSessionId ?? event.fromSessionId;
           const localStream = await prepareLocalCallMedia(activeCall.mode, activeCall.muted, activeCall.cameraEnabled);
           const peer = await ensurePeerConnection(event.callId, remoteSessionId, localStream);
+          const mobileCall = await loadMobileCallRuntime();
 
           if (event.signal.type === 'offer') {
-            const answer = await applyMobileOffer(peer, event.signal.sdp);
+            const answer = await mobileCall.applyMobileOffer(peer, event.signal.sdp);
             await flushQueuedIceCandidates(event.callId, peer);
             relayHandleRef.current?.send({
               type: 'call_signal',
@@ -2043,14 +2064,14 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           }
 
           if (event.signal.type === 'answer') {
-            await applyMobileAnswer(peer, event.signal.sdp);
+            await mobileCall.applyMobileAnswer(peer, event.signal.sdp);
             await flushQueuedIceCandidates(event.callId, peer);
             return;
           }
 
           const candidate = (event.signal as Extract<typeof event.signal, { type: 'ice-candidate' }>).candidate;
           if (peer.remoteDescription) {
-            await addMobileIceCandidate(peer, candidate);
+            await mobileCall.addMobileIceCandidate(peer, candidate);
           } else {
             queueIceCandidate(event.callId, candidate);
           }
@@ -2067,6 +2088,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       finishCurrentCall,
       flushQueuedIceCandidates,
       createLiveKitCallToken,
+      loadMobileCallRuntime,
       prepareLocalCallMedia,
       queueIceCandidate,
       startOutgoingOffer,
@@ -2261,7 +2283,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       }
 
       const nextMuted = !current.muted;
-      setMobileMicrophoneMuted(localCallStreamRef.current, nextMuted);
+      mobileCallRuntimeRef.current?.setMobileMicrophoneMuted(localCallStreamRef.current, nextMuted);
       return {
         ...current,
         muted: nextMuted
@@ -2276,7 +2298,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       }
 
       const nextEnabled = !current.cameraEnabled;
-      setMobileCameraEnabled(localCallStreamRef.current, nextEnabled);
+      mobileCallRuntimeRef.current?.setMobileCameraEnabled(localCallStreamRef.current, nextEnabled);
       return {
         ...current,
         cameraEnabled: nextEnabled
@@ -2492,12 +2514,13 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       kind: 'avatar' | 'post' | 'story',
       input: MediaUploadInput
     ) => {
-      const sniffedMimeType = sniffBase64MediaMimeType(input.bytesBase64);
+      const base64Payload = normalizeBase64MediaPayload(input.bytesBase64);
+      const sniffedMimeType = sniffBase64MediaMimeType(base64Payload);
       const mimeType = sniffedMimeType || guessMimeType(input.uri, input.mimeType);
       const fileName = ensureFileNameMatchesMimeType(guessFileName(input.uri, input.fileName, mimeType), mimeType);
       const uploadTimeoutMs = 120_000;
       const uploadJsonPayload = async (bytesBase64: string) => {
-        const payload = bytesBase64.trim();
+        const payload = normalizeBase64MediaPayload(bytesBase64);
         if (!payload) {
           throw new Error('Could not read that media file from Android. Please choose another photo or video.');
         }
@@ -2514,8 +2537,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         });
       };
 
-      if (input.bytesBase64) {
-        return uploadJsonPayload(input.bytesBase64);
+      if (base64Payload) {
+        return uploadJsonPayload(base64Payload);
       }
 
       const formData = new FormData();
@@ -2536,7 +2559,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         });
       } catch (multipartError) {
         const bytesBase64 =
-          input.bytesBase64 ??
+          base64Payload ||
           (await promiseWithTimeout(
             FileSystem.readAsStringAsync(input.uri, {
               encoding: FileSystem.EncodingType.Base64
