@@ -15,6 +15,7 @@ import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import PublicProfileScreen from './screens/PublicProfileScreen';
 import AuthScreen from './screens/AuthScreen';
+import CallOverlay from './components/CallOverlay';
 import { COLORS, FONTS } from './lib/theme';
 import { KrynoBackendProvider, useKrynoBackend } from './lib/krynoBackend';
 import { captureMobileException, initMobileObservability } from './lib/observability';
@@ -178,6 +179,7 @@ function AppShell() {
         <Stack.Screen name="MainTabs" component={MainTabs} />
         <Stack.Screen name="PublicProfile" component={PublicProfileScreen} />
       </Stack.Navigator>
+      <CallOverlay />
     </View>
   );
 }

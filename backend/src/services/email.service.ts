@@ -5,6 +5,15 @@ import { env } from '../config/env.js';
 dns.setDefaultResultOrder('ipv4first');
 
 const EMAIL_SEND_TIMEOUT_MS = 45_000;
+const PROVIDER_ERROR_BODY_LIMIT = 500;
+
+type MailPayload = {
+  from: string;
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+};
 
 async function withEmailTimeout<T>(operation: Promise<T>, label: string): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
@@ -25,10 +34,25 @@ async function withEmailTimeout<T>(operation: Promise<T>, label: string): Promis
   }
 }
 
+function logDevelopmentEmailCode(label: string, payload: Record<string, unknown>) {
+  if (env.APP_ENV !== 'production' || env.ALLOW_DEV_EMAIL_TOKEN_PREVIEW) {
+    console.log(label, JSON.stringify(payload));
+  }
+}
+
+function emailAddressOnly(value: string) {
+  const bracketMatch = value.match(/<([^>]+)>/);
+  return bracketMatch?.[1]?.trim() || value.trim();
+}
+
 export class EmailService {
   private transporterPromise: Promise<ReturnType<typeof nodemailer.createTransport>> | null = null;
 
   private async getTransporter() {
+    if (env.EMAIL_PROVIDER !== 'smtp') {
+      return null;
+    }
+
     if (!env.SMTP_HOST || !env.SMTP_PORT || !env.EMAIL_FROM) {
       return null;
     }
@@ -56,19 +80,133 @@ export class EmailService {
   }
 
   get hasRealTransport() {
-    return Boolean(env.SMTP_HOST && env.SMTP_PORT && env.EMAIL_FROM);
+    if (!env.EMAIL_FROM) {
+      return false;
+    }
+
+    switch (env.EMAIL_PROVIDER) {
+      case 'resend':
+        return Boolean(env.RESEND_API_KEY);
+      case 'brevo':
+        return Boolean(env.BREVO_API_KEY);
+      case 'postmark':
+        return Boolean(env.POSTMARK_SERVER_TOKEN);
+      case 'smtp':
+      default:
+        return Boolean(env.SMTP_HOST && env.SMTP_PORT && env.EMAIL_FROM);
+    }
+  }
+
+  private async postProviderJson(
+    url: string,
+    headers: Record<string, string>,
+    body: unknown,
+    label: string
+  ) {
+    const response = await withEmailTimeout(
+      fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...headers
+        },
+        body: JSON.stringify(body)
+      }),
+      label
+    );
+
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => '');
+      throw new Error(
+        `${label} provider rejected the request with HTTP ${response.status}: ${bodyText.slice(0, PROVIDER_ERROR_BODY_LIMIT)}`
+      );
+    }
+  }
+
+  private async sendMailPayload(payload: MailPayload, label: string): Promise<boolean> {
+    if (!payload.from) {
+      return false;
+    }
+
+    if (env.EMAIL_PROVIDER === 'resend') {
+      if (!env.RESEND_API_KEY) {
+        return false;
+      }
+
+      await this.postProviderJson(
+        'https://api.resend.com/emails',
+        { Authorization: `Bearer ${env.RESEND_API_KEY}` },
+        {
+          from: payload.from,
+          to: [payload.to],
+          subject: payload.subject,
+          text: payload.text,
+          html: payload.html
+        },
+        label
+      );
+      return true;
+    }
+
+    if (env.EMAIL_PROVIDER === 'brevo') {
+      if (!env.BREVO_API_KEY) {
+        return false;
+      }
+
+      await this.postProviderJson(
+        'https://api.brevo.com/v3/smtp/email',
+        { 'api-key': env.BREVO_API_KEY },
+        {
+          sender: { email: emailAddressOnly(payload.from) },
+          to: [{ email: payload.to }],
+          subject: payload.subject,
+          textContent: payload.text,
+          htmlContent: payload.html
+        },
+        label
+      );
+      return true;
+    }
+
+    if (env.EMAIL_PROVIDER === 'postmark') {
+      if (!env.POSTMARK_SERVER_TOKEN) {
+        return false;
+      }
+
+      await this.postProviderJson(
+        'https://api.postmarkapp.com/email',
+        { 'X-Postmark-Server-Token': env.POSTMARK_SERVER_TOKEN },
+        {
+          From: payload.from,
+          To: payload.to,
+          Subject: payload.subject,
+          TextBody: payload.text,
+          HtmlBody: payload.html,
+          MessageStream: 'outbound'
+        },
+        label
+      );
+      return true;
+    }
+
+    const transporter = await this.getTransporter();
+    if (!transporter) {
+      return false;
+    }
+
+    await withEmailTimeout(transporter.sendMail(payload), label);
+    return true;
   }
 
   async sendVerificationEmail(email: string, code: string): Promise<boolean> {
-    const transporter = await this.getTransporter();
-    if (!transporter || !env.EMAIL_FROM) {
-      console.log('[EMAIL_VERIFICATION_CODE]', JSON.stringify({ email, code }));
+    if (!env.EMAIL_FROM) {
+      logDevelopmentEmailCode('[EMAIL_VERIFICATION_CODE]', { email, code });
       return false;
     }
 
     try {
-      await withEmailTimeout(
-        transporter.sendMail({
+      const sent = await this.sendMailPayload(
+        {
           from: env.EMAIL_FROM,
           to: email,
           subject: 'Your KRYNO verification code',
@@ -90,28 +228,31 @@ export class EmailService {
               </div>
             </div>
           `
-        }),
+        },
         'Verification email'
       );
 
-      return true;
+      if (!sent) {
+        logDevelopmentEmailCode('[EMAIL_VERIFICATION_CODE]', { email, code });
+      }
+
+      return sent;
     } catch (error) {
       console.error('[EMAIL_VERIFICATION_SEND_FAILED]', error);
-      console.log('[EMAIL_VERIFICATION_CODE]', JSON.stringify({ email, code }));
+      logDevelopmentEmailCode('[EMAIL_VERIFICATION_CODE]', { email, code });
       return false;
     }
   }
 
   async sendPasswordResetEmail(email: string, code: string): Promise<boolean> {
-    const transporter = await this.getTransporter();
-    if (!transporter || !env.EMAIL_FROM) {
-      console.log('[PASSWORD_RESET_CODE]', JSON.stringify({ email, code }));
+    if (!env.EMAIL_FROM) {
+      logDevelopmentEmailCode('[PASSWORD_RESET_CODE]', { email, code });
       return false;
     }
 
     try {
-      await withEmailTimeout(
-        transporter.sendMail({
+      const sent = await this.sendMailPayload(
+        {
           from: env.EMAIL_FROM,
           to: email,
           subject: 'Your KRYNO password reset code',
@@ -133,14 +274,18 @@ export class EmailService {
               </div>
             </div>
           `
-        }),
+        },
         'Password reset email'
       );
 
-      return true;
+      if (!sent) {
+        logDevelopmentEmailCode('[PASSWORD_RESET_CODE]', { email, code });
+      }
+
+      return sent;
     } catch (error) {
       console.error('[PASSWORD_RESET_SEND_FAILED]', error);
-      console.log('[PASSWORD_RESET_CODE]', JSON.stringify({ email, code }));
+      logDevelopmentEmailCode('[PASSWORD_RESET_CODE]', { email, code });
       return false;
     }
   }
@@ -160,15 +305,14 @@ export class EmailService {
     const userAgent = input.userAgent || 'unknown device/browser';
     const occurredAt = input.occurredAt.toISOString();
 
-    const transporter = await this.getTransporter();
-    if (!transporter || !env.EMAIL_FROM) {
-      console.log('[SECURITY_ALERT_EMAIL]', JSON.stringify({ email, username: input.username, deviceName, ip, userAgent, occurredAt }));
+    if (!env.EMAIL_FROM) {
+      logDevelopmentEmailCode('[SECURITY_ALERT_EMAIL]', { email, username: input.username, deviceName, ip, userAgent, occurredAt });
       return false;
     }
 
     try {
-      await withEmailTimeout(
-        transporter.sendMail({
+      const sent = await this.sendMailPayload(
+        {
           from: env.EMAIL_FROM,
           to: email,
           subject: 'New KRYNO login detected',
@@ -192,11 +336,15 @@ export class EmailService {
               </div>
             </div>
           `
-        }),
+        },
         'Security alert email'
       );
 
-      return true;
+      if (!sent) {
+        logDevelopmentEmailCode('[SECURITY_ALERT_EMAIL]', { email, username: input.username, deviceName, ip, userAgent, occurredAt });
+      }
+
+      return sent;
     } catch (error) {
       console.error('[SECURITY_ALERT_SEND_FAILED]', error);
       return false;

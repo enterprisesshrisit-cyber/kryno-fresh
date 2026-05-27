@@ -40,6 +40,8 @@ services:
         value: 10
       - key: ALLOW_DEV_EMAIL_TOKEN_PREVIEW
         value: false
+      - key: EMAIL_PROVIDER
+        value: smtp
       - key: SMTP_TLS_REJECT_UNAUTHORIZED
         value: true
       - key: REDIS_TLS
@@ -75,6 +77,12 @@ services:
       - key: OTP_PEPPER
         sync: false
       - key: EMAIL_FROM
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: POSTMARK_SERVER_TOKEN
         sync: false
       - key: SMTP_HOST
         sync: false

@@ -33,6 +33,10 @@ const envSchema = z.object({
   RESET_PASSWORD_OTP_TTL_MINUTES: z.coerce.number().int().positive().default(10),
   APP_BASE_URL: z.string().url(),
   EMAIL_FROM: z.string().email().optional(),
+  EMAIL_PROVIDER: z.enum(['smtp', 'resend', 'brevo', 'postmark']).default('smtp'),
+  RESEND_API_KEY: z.string().optional(),
+  BREVO_API_KEY: z.string().optional(),
+  POSTMARK_SERVER_TOKEN: z.string().optional(),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().positive().optional(),
   SMTP_SECURE: z
@@ -202,10 +206,19 @@ const envSchema = z.object({
     });
   }
 
-  if (!env.SMTP_HOST || !env.SMTP_USER || !env.SMTP_PASS || !env.EMAIL_FROM) {
+  const emailProviderReady =
+    env.EMAIL_PROVIDER === 'smtp'
+      ? Boolean(env.SMTP_HOST && env.SMTP_PORT && env.SMTP_USER && env.SMTP_PASS && env.EMAIL_FROM)
+      : env.EMAIL_PROVIDER === 'resend'
+        ? Boolean(env.RESEND_API_KEY && env.EMAIL_FROM)
+        : env.EMAIL_PROVIDER === 'brevo'
+          ? Boolean(env.BREVO_API_KEY && env.EMAIL_FROM)
+          : Boolean(env.POSTMARK_SERVER_TOKEN && env.EMAIL_FROM);
+
+  if (!emailProviderReady) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      path: ['SMTP_HOST'],
+      path: ['EMAIL_PROVIDER'],
       message: 'Production auth requires a configured transactional email provider.'
     });
   }

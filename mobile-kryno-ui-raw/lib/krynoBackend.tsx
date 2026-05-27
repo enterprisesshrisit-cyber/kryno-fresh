@@ -365,7 +365,7 @@ const MOBILE_CHAT_THREADS_STORAGE_KEY = 'kryno_mobile_chat_threads_v1';
 const MOBILE_CHAT_KNOWN_USERS_STORAGE_KEY = 'kryno_mobile_chat_known_users_v1';
 const MOBILE_CHAT_SEEN_INBOX_STORAGE_KEY = 'kryno_mobile_chat_seen_inbox_v1';
 const MOBILE_STORAGE_SCHEMA_KEY = 'kryno_mobile_storage_schema_version';
-const MOBILE_STORAGE_SCHEMA_VERSION = '2026-05-22-stable-shell-v2';
+const MOBILE_STORAGE_SCHEMA_VERSION = '2026-05-27-calls-enabled-v1';
 const RESET_ON_SCHEMA_CHANGE_KEYS = [
   MOBILE_CHAT_MESSAGES_STORAGE_KEY,
   MOBILE_CHAT_THREADS_STORAGE_KEY,
@@ -380,7 +380,7 @@ const DEFAULT_BACKEND_ORIGIN =
 const BUILD_LOCKED_BACKEND_ORIGIN = !__DEV__ && DEFAULT_BACKEND_ORIGIN.trim()
   ? DEFAULT_BACKEND_ORIGIN.trim().replace(/\/+$/, '')
   : '';
-const STABLE_STARTUP_MODE = process.env.EXPO_PUBLIC_KRYNO_STABLE_STARTUP !== 'false';
+const STABLE_STARTUP_MODE = process.env.EXPO_PUBLIC_KRYNO_STABLE_STARTUP === 'true';
 
 const TIER_SEQUENCE = ['Basic', 'Inner Circle', 'Elite'] as const;
 const MOOD_SEQUENCE = ['chill', 'social', 'focus'] as const;
@@ -1487,6 +1487,16 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           },
           onCallEvent: async (event) => {
             await handleRelayCallEventRef.current?.(event);
+          },
+          onStatus: (status, detail) => {
+            if (status === 'connected') {
+              setError('');
+              return;
+            }
+
+            if (status === 'error' && detail) {
+              setError(detail);
+            }
           }
         });
 

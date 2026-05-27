@@ -748,6 +748,7 @@ export function connectMobileDirectRelay(
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let open = false;
+  let authenticated = false;
 
   const clearHeartbeat = () => {
     if (heartbeatTimer !== null) {
@@ -767,6 +768,7 @@ export function connectMobileDirectRelay(
 
     socket.onopen = () => {
       open = true;
+      authenticated = false;
       socket?.send(JSON.stringify({ type: 'auth', accessToken: session.accessToken }));
       clearHeartbeat();
       heartbeatTimer = setInterval(() => {
@@ -792,6 +794,7 @@ export function connectMobileDirectRelay(
         }
 
         if (payload.type === 'relay_ready') {
+          authenticated = true;
           handlers.onStatus?.('connected');
           return;
         }
@@ -823,6 +826,7 @@ export function connectMobileDirectRelay(
 
     socket.onclose = () => {
       open = false;
+      authenticated = false;
       clearHeartbeat();
       if (disposed) {
         return;
@@ -835,6 +839,7 @@ export function connectMobileDirectRelay(
 
     socket.onerror = () => {
       open = false;
+      authenticated = false;
       clearHeartbeat();
       handlers.onStatus?.('error', 'Direct relay socket error.');
     };
@@ -844,7 +849,7 @@ export function connectMobileDirectRelay(
 
   return {
     send(command: ClientRelayCommand) {
-      if (!socket || !open || socket.readyState !== WebSocket.OPEN) {
+      if (!socket || !open || !authenticated || socket.readyState !== WebSocket.OPEN) {
         return false;
       }
 

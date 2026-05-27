@@ -3,6 +3,7 @@ import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   TextInput, KeyboardAvoidingView, Platform, Animated,
   Dimensions, StatusBar, Modal, TouchableWithoutFeedback,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -545,25 +546,39 @@ export default function ChatScreen({ route, navigation }: any) {
   };
 
   const startVoiceCall = async () => {
-    await startConversationCall(
-      {
-        conversationKey,
-        recipientLookup: convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey,
-        user: convo.user
-      },
-      'audio'
-    );
+    try {
+      await startConversationCall(
+        {
+          conversationKey,
+          recipientLookup: convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey,
+          user: convo.user
+        },
+        'audio'
+      );
+    } catch (callError) {
+      Alert.alert(
+        'Call failed',
+        callError instanceof Error ? callError.message : 'Unable to start audio call right now.'
+      );
+    }
   };
 
   const startVideoCall = async () => {
-    await startConversationCall(
-      {
-        conversationKey,
-        recipientLookup: convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey,
-        user: convo.user
-      },
-      'video'
-    );
+    try {
+      await startConversationCall(
+        {
+          conversationKey,
+          recipientLookup: convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey,
+          user: convo.user
+        },
+        'video'
+      );
+    } catch (callError) {
+      Alert.alert(
+        'Video call failed',
+        callError instanceof Error ? callError.message : 'Unable to start video call right now.'
+      );
+    }
   };
 
   const addReaction = (msgId: string, reaction: string) => {
