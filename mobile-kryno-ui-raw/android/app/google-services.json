@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "498582144940",
+    "project_id": "kryno-1a9b7",
+    "storage_bucket": "kryno-1a9b7.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:498582144940:android:618e34adf6ea52a11e9c09",
+        "android_client_info": {
+          "package_name": "com.kryno.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBWX3sacMSI6RWJ315PItlORBfIaPpaePc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
