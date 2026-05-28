@@ -13,6 +13,7 @@ import { attachmentsRoutes } from './routes/attachments.routes.js';
 import { authRoutes } from './routes/auth.routes.js';
 import { billingRoutes } from './routes/billing.routes.js';
 import { callsRoutes } from './routes/calls.routes.js';
+import { devicesRoutes } from './routes/devices.routes.js';
 import { keysRoutes } from './routes/keys.routes.js';
 import { messagesRoutes } from './routes/messages.routes.js';
 import { relayRoutes } from './routes/relay.routes.js';
@@ -42,7 +43,9 @@ export async function buildApp() {
           'body.refresh_token',
           'body.code',
           'body.device_public_key',
-          'body.encryptedBytesBase64'
+          'body.encryptedBytesBase64',
+          'body.pushToken',
+          'body.push_token'
         ],
         remove: true
       }
@@ -100,7 +103,7 @@ export async function buildApp() {
 
   await app.register(rateLimit, {
     ...rateLimitStoreOptions,
-    max: 300,
+    max: 900,
     timeWindow: '1 minute',
     keyGenerator: (request) => `${request.ip}:${request.url}`
   });
@@ -147,7 +150,7 @@ export async function buildApp() {
   await app.register(async (instance) => {
     await instance.register(rateLimit, {
       ...rateLimitStoreOptions,
-      max: 8,
+      max: 60,
       timeWindow: '1 minute'
     });
     await instance.register(authRoutes, { prefix: '/api/auth' });
@@ -156,7 +159,7 @@ export async function buildApp() {
   await app.register(async (instance) => {
     await instance.register(rateLimit, {
       ...rateLimitStoreOptions,
-      max: 20,
+      max: 180,
       timeWindow: '1 minute'
     });
     await instance.register(keysRoutes, { prefix: '/api/keys' });
@@ -165,7 +168,7 @@ export async function buildApp() {
   await app.register(async (instance) => {
     await instance.register(rateLimit, {
       ...rateLimitStoreOptions,
-      max: 60,
+      max: 120,
       timeWindow: '1 minute'
     });
     await instance.register(usersRoutes, { prefix: '/api/users' });
@@ -174,7 +177,16 @@ export async function buildApp() {
   await app.register(async (instance) => {
     await instance.register(rateLimit, {
       ...rateLimitStoreOptions,
-      max: 60,
+      max: 120,
+      timeWindow: '1 minute'
+    });
+    await instance.register(devicesRoutes, { prefix: '/api/devices' });
+  });
+
+  await app.register(async (instance) => {
+    await instance.register(rateLimit, {
+      ...rateLimitStoreOptions,
+      max: 120,
       timeWindow: '1 minute'
     });
     await instance.register(callsRoutes, { prefix: '/api/calls' });
@@ -183,7 +195,7 @@ export async function buildApp() {
   await app.register(async (instance) => {
     await instance.register(rateLimit, {
       ...rateLimitStoreOptions,
-      max: 240,
+      max: 600,
       timeWindow: '1 minute'
     });
     await instance.register(messagesRoutes, { prefix: '/api/messages' });
@@ -203,7 +215,7 @@ export async function buildApp() {
   await app.register(async (instance) => {
     await instance.register(rateLimit, {
       ...rateLimitStoreOptions,
-      max: 80,
+      max: 240,
       timeWindow: '1 minute'
     });
     await instance.register(attachmentsRoutes, { prefix: '/api/attachments' });
