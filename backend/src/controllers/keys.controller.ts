@@ -2,23 +2,23 @@ import { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { keysService } from '../services/keys.service.js';
 
-const uploadBundleSchema = z.object({
+export const uploadBundleSchema = z.object({
   registrationId: z.number().int().positive(),
   identityPublicKey: z.string().min(16),
   signedPrekey: z.object({
     keyId: z.number().int().nonnegative(),
     publicKey: z.string().min(16),
     signature: z.string().min(16)
-  }),
+  }).strict(),
   oneTimePrekeys: z
     .array(
       z.object({
         keyId: z.number().int().nonnegative(),
         publicKey: z.string().min(16)
-      })
+      }).strict()
     )
     .max(500)
-});
+}).strict();
 
 const fetchBundleParamsSchema = z.object({
   lookup: z.string().min(3).max(128)
