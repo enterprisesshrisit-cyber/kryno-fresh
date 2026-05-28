@@ -49,6 +49,30 @@ async function checkSecurityHeaders(): Promise<CheckResult> {
   }
 }
 
+async function checkHostedEnvironment(): Promise<CheckResult> {
+  try {
+    const response = await fetch(`${env.APP_BASE_URL.replace(/\/+$/, '')}/api/health`, {
+      headers: {
+        Accept: 'application/json',
+        'X-Kryno-Staging-Check': 'true'
+      }
+    });
+    const payload = (await response.json()) as { environment?: string };
+
+    return {
+      name: 'hosted API production environment',
+      ok: response.ok && payload.environment === 'production',
+      detail: payload.environment ? `environment=${payload.environment}` : `${response.status} ${response.statusText}`
+    };
+  } catch (error) {
+    return {
+      name: 'hosted API production environment',
+      ok: false,
+      detail: error instanceof Error ? error.message : 'request failed'
+    };
+  }
+}
+
 function staticConfigChecks(): CheckResult[] {
   return [
     {
@@ -95,6 +119,7 @@ async function main() {
     ...staticConfigChecks(),
     await checkHttp('health endpoint', `${baseUrl}/api/health`),
     await checkHttp('readiness endpoint', `${baseUrl}/api/ready`),
+    await checkHostedEnvironment(),
     await checkSecurityHeaders()
   ];
 
