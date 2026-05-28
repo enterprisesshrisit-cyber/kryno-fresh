@@ -92,8 +92,8 @@ android {
         applicationId 'com.kryno.mobile'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 19
-        versionName "1.0.19"
+        versionCode 28
+        versionName "1.0.28"
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }
@@ -179,4 +179,10 @@ dependencies {
     } else {
         implementation jscFlavor
     }
+}
+
+if (file("google-services.json").exists()) {
+    apply plugin: "com.google.gms.google-services"
+} else {
+    logger.lifecycle("Kryno FCM: android/app/google-services.json is missing; remote push tokens will not work in this APK.")
 }
