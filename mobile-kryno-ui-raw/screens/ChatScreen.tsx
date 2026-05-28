@@ -3,17 +3,54 @@ import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   TextInput, KeyboardAvoidingView, Platform, Animated,
   Dimensions, StatusBar, Modal, TouchableWithoutFeedback,
-  Alert,
+  Alert, PermissionsAndroid,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
+import * as ImagePicker from 'expo-image-picker';
+import {
+  createAudioPlayer,
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState
+} from 'expo-audio';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { COLORS, FONTS, RADIUS, SPACE, MOOD, TIER } from '../lib/theme';
 import ChatBackground, { type ChatThemeType } from '../components/ChatBackground';
 import { useKrynoBackend } from '../lib/krynoBackend';
 
 const { width, height } = Dimensions.get('window');
+const QUICK_EMOJIS = ['😀', '😂', '😍', '🔥', '👏', '❤️', '🙏', '😎', '😢', '👍', '🎉', '💯'];
+
+type MessageStatus = 'sending' | 'sent' | 'delivered' | 'seen' | 'failed' | 'received';
+type AttachmentKind = 'voice' | 'image' | 'video' | 'file';
+
+function statusLabel(status?: MessageStatus) {
+  switch (status) {
+    case 'sending':
+      return 'Sending';
+    case 'delivered':
+      return 'Delivered';
+    case 'seen':
+      return 'Seen';
+    case 'failed':
+      return 'Failed';
+    case 'sent':
+      return 'Sent';
+    default:
+      return '';
+  }
+}
+
+function formatDuration(seconds?: number) {
+  const safe = Math.max(0, Math.round(seconds ?? 0));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
 const REACTIONS = ['✦', '🌙', '🔥', '❤️', '🧠', '👏'];
 
 // ─── CHAT THEMES ─────────────────────────────────────────────────────────────
@@ -280,7 +317,14 @@ function CallButton({ icon, type, onPress }: { icon: any; type: 'voice' | 'video
   const glowOpacity = glow.interpolate({ inputRange: [0, 1], outputRange: [0, 0.55] });
 
   return (
-    <TouchableOpacity activeOpacity={1} onPressIn={onPressIn} onPressOut={onPressOut} onPress={onPress}>
+    <TouchableOpacity
+      activeOpacity={1}
+      onPressIn={onPressIn}
+      onPressOut={onPressOut}
+      onPress={onPress}
+      hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+      accessibilityRole="button"
+    >
       <Animated.View style={[styles.callBtnWrap, { transform: [{ scale }] }]}>
         <Animated.View style={[
           styles.callBtnHalo,
@@ -311,7 +355,15 @@ function ThreeDotButton({ onPress }: { onPress: () => void }) {
   const onPressOut = () => Animated.spring(scale, { toValue: 1,    useNativeDriver: true, tension: 160 }).start();
 
   return (
-    <TouchableOpacity activeOpacity={1} onPressIn={onPressIn} onPressOut={onPressOut} onPress={onPress}>
+    <TouchableOpacity
+      activeOpacity={1}
+      onPressIn={onPressIn}
+      onPressOut={onPressOut}
+      onPress={onPress}
+      hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+      accessibilityRole="button"
+      accessibilityLabel="Chat menu"
+    >
       <Animated.View style={[styles.threeDotBtn, { transform: [{ scale }] }]}>
         <View style={styles.threeDotInner}>
           {[0, 1, 2].map(i => (
@@ -324,6 +376,124 @@ function ThreeDotButton({ onPress }: { onPress: () => void }) {
 }
 
 // ─── MESSAGE BUBBLE ───────────────────────────────────────────────────────────
+function VoiceMessageBubble({
+  uri,
+  durationSeconds,
+  isMe,
+  status
+}: {
+  uri?: string;
+  durationSeconds?: number;
+  isMe: boolean;
+  status?: MessageStatus;
+}) {
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const playerRef = useRef<ReturnType<typeof createAudioPlayer> | null>(null);
+
+  useEffect(() => () => {
+    try {
+      playerRef.current?.pause();
+    } catch {
+      // no-op
+    }
+    playerRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    if (!playing) return;
+    const timer = setInterval(() => {
+      const player = playerRef.current;
+      if (!player) return;
+      const duration = player.duration || durationSeconds || 1;
+      const next = Math.min(1, Math.max(0, player.currentTime / duration));
+      setProgress(next);
+      if (duration > 0 && player.currentTime >= duration - 0.1) {
+        player.pause();
+        setPlaying(false);
+        setProgress(0);
+      }
+    }, 250);
+    return () => clearInterval(timer);
+  }, [durationSeconds, playing]);
+
+  const togglePlayback = () => {
+    if (!uri) {
+      Alert.alert('Voice unavailable', 'This encrypted voice note could not be opened on this device.');
+      return;
+    }
+
+    try {
+      const player = playerRef.current ?? createAudioPlayer({ uri }, { updateInterval: 250 });
+      playerRef.current = player;
+      if (playing) {
+        player.pause();
+        setPlaying(false);
+        return;
+      }
+      player.play();
+      setPlaying(true);
+    } catch (error) {
+      Alert.alert('Playback failed', error instanceof Error ? error.message : 'Unable to play this voice note.');
+    }
+  };
+
+  return (
+    <View style={[styles.voiceBubble, isMe && styles.voiceBubbleMe]}>
+      <TouchableOpacity style={styles.voicePlayBtn} onPress={togglePlayback} activeOpacity={0.82}>
+        <Ionicons name={playing ? 'pause' : 'play'} size={18} color={COLORS.white} />
+      </TouchableOpacity>
+      <View style={styles.voiceBody}>
+        <View style={styles.waveform}>
+          {Array.from({ length: 18 }, (_, index) => (
+            <View
+              key={index}
+              style={[
+                styles.waveBar,
+                { height: 8 + ((index * 7) % 18), opacity: progress >= index / 18 ? 1 : 0.42 }
+              ]}
+            />
+          ))}
+        </View>
+        <View style={styles.voiceMetaRow}>
+          <Text style={styles.voiceDuration}>{formatDuration(durationSeconds)}</Text>
+          {status === 'failed' && <Text style={styles.voiceFailed}>Retry</Text>}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function MediaMessageBubble({
+  uri,
+  mediaKind,
+  fileName,
+  isMe
+}: {
+  uri?: string;
+  mediaKind?: AttachmentKind;
+  fileName?: string;
+  isMe: boolean;
+}) {
+  if (mediaKind === 'image' && uri) {
+    return (
+      <View style={[styles.mediaBubble, isMe && styles.mediaBubbleMe]}>
+        <Image source={{ uri }} style={styles.mediaPreview} contentFit="cover" />
+      </View>
+    );
+  }
+
+  return (
+    <View style={[styles.fileBubble, isMe && styles.fileBubbleMe]}>
+      <Ionicons name={mediaKind === 'video' ? 'videocam' : 'document-attach'} size={22} color={COLORS.primaryLight} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.fileTitle}>{mediaKind === 'video' ? 'Encrypted video' : 'Encrypted file'}</Text>
+        <Text style={styles.fileName} numberOfLines={1}>{fileName || 'Attachment'}</Text>
+      </View>
+    </View>
+  );
+}
+
 function MessageBubble({
   msg, onReact,
 }: {
@@ -333,6 +503,13 @@ function MessageBubble({
     text: string;
     time: string;
     reactions: string[];
+    status?: MessageStatus;
+    kind?: 'text' | 'attachment';
+    mediaKind?: AttachmentKind;
+    localUri?: string;
+    fileName?: string;
+    mimeType?: string;
+    durationSeconds?: number;
   };
   onReact: (id: string, r: string) => void;
 }) {
@@ -381,13 +558,25 @@ function MessageBubble({
                   start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
                   style={styles.sentBubbleGrad}
                 >
-                  <Text style={styles.msgTextMe}>{msg.text}</Text>
+                  {msg.kind === 'attachment' && msg.mediaKind === 'voice' ? (
+                    <VoiceMessageBubble uri={msg.localUri} durationSeconds={msg.durationSeconds} isMe status={msg.status} />
+                  ) : msg.kind === 'attachment' ? (
+                    <MediaMessageBubble uri={msg.localUri} mediaKind={msg.mediaKind} fileName={msg.fileName} isMe />
+                  ) : (
+                    <Text style={styles.msgTextMe}>{msg.text}</Text>
+                  )}
                 </LinearGradient>
                 <View style={styles.sentBubbleGlowEdge} />
               </View>
             ) : (
               <View style={styles.recvBubble}>
-                <Text style={styles.msgTextThem}>{msg.text}</Text>
+                {msg.kind === 'attachment' && msg.mediaKind === 'voice' ? (
+                  <VoiceMessageBubble uri={msg.localUri} durationSeconds={msg.durationSeconds} isMe={false} status={msg.status} />
+                ) : msg.kind === 'attachment' ? (
+                  <MediaMessageBubble uri={msg.localUri} mediaKind={msg.mediaKind} fileName={msg.fileName} isMe={false} />
+                ) : (
+                  <Text style={styles.msgTextThem}>{msg.text}</Text>
+                )}
               </View>
             )}
           </Animated.View>
@@ -428,7 +617,7 @@ function MessageBubble({
         )}
 
         <Animated.Text style={[styles.msgTime, isMe && styles.msgTimeMe, { opacity: fadeAnim }]}>
-          {msg.time}
+          {isMe && statusLabel(msg.status) ? `${msg.time} · ${statusLabel(msg.status)}` : msg.time}
         </Animated.Text>
       </View>
     </Animated.View>
@@ -468,7 +657,10 @@ function TypingIndicator() {
 
 // ─── MAIN SCREEN ──────────────────────────────────────────────────────────────
 export default function ChatScreen({ route, navigation }: any) {
-  const { getConversationMessages, sendConversationMessage, markConversationRead, startConversationCall } = useKrynoBackend();
+  const insets = useSafeAreaInsets();
+  const { getConversationMessages, sendConversationMessage, sendConversationAttachment, markConversationRead, startConversationCall } = useKrynoBackend();
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorderState = useAudioRecorderState(audioRecorder);
   const convo = route?.params?.conversation || {
     user: {
       name: 'Kryno User',
@@ -486,6 +678,7 @@ export default function ChatScreen({ route, navigation }: any) {
     convo.user?.name?.toLowerCase().replace(/\s+/g, '.') ||
     'kryno';
   const liveMessages = getConversationMessages(conversationKey);
+  const bottomInputInset = Math.max(insets.bottom, Platform.OS === 'android' ? 34 : 10);
 
   const [messages,       setMessages]       = useState(liveMessages);
   const [input,          setInput]          = useState('');
@@ -493,6 +686,8 @@ export default function ChatScreen({ route, navigation }: any) {
   const [chatTheme,      setChatTheme]      = useState<ChatThemeType>('dark_glass');
   const [showMenu,       setShowMenu]       = useState(false);
   const [showThemeSheet, setShowThemeSheet] = useState(false);
+  const [showEmojiTray,  setShowEmojiTray]  = useState(false);
+  const [composerBusy,   setComposerBusy]   = useState(false);
   const [toggleStates,   setToggleStates]   = useState<Record<string, boolean>>({
     focus: false, mute: false, private: false,
   });
@@ -540,13 +735,45 @@ export default function ChatScreen({ route, navigation }: any) {
         nextText
       );
       setTimeout(() => flatRef.current?.scrollToEnd({ animated: true }), 80);
-    } catch {
+    } catch (error) {
       setInput(nextText);
+      Alert.alert(
+        'Message failed',
+        error instanceof Error ? error.message : 'Unable to send this message right now.'
+      );
     }
   };
 
+  const ensureCallPermissions = useCallback(async (mode: 'audio' | 'video') => {
+    if (Platform.OS !== 'android') {
+      return true;
+    }
+
+    const permissions = [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
+    if (mode === 'video') {
+      permissions.push(PermissionsAndroid.PERMISSIONS.CAMERA);
+    }
+
+    const result = await PermissionsAndroid.requestMultiple(permissions);
+    const blocked = permissions.filter((permission) => result[permission] !== PermissionsAndroid.RESULTS.GRANTED);
+    if (blocked.length > 0) {
+      Alert.alert(
+        'Call permission needed',
+        mode === 'video'
+          ? 'Allow microphone and camera access to start a video call.'
+          : 'Allow microphone access to start an audio call.'
+      );
+      return false;
+    }
+
+    return true;
+  }, []);
+
   const startVoiceCall = async () => {
     try {
+      if (!(await ensureCallPermissions('audio'))) {
+        return;
+      }
       await startConversationCall(
         {
           conversationKey,
@@ -565,6 +792,9 @@ export default function ChatScreen({ route, navigation }: any) {
 
   const startVideoCall = async () => {
     try {
+      if (!(await ensureCallPermissions('video'))) {
+        return;
+      }
       await startConversationCall(
         {
           conversationKey,
@@ -580,6 +810,102 @@ export default function ChatScreen({ route, navigation }: any) {
       );
     }
   };
+
+  const pickChatMedia = useCallback(async () => {
+    if (composerBusy) return;
+    setComposerBusy(true);
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Media permission needed', 'Allow photo and video access to attach media in chat.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.All,
+        allowsEditing: false,
+        quality: 0.86,
+        videoQuality: ImagePicker.UIImagePickerControllerQualityType.Medium,
+      });
+
+      if (result.canceled || !result.assets?.[0]) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      const mimeType = asset.mimeType || (asset.type === 'video' ? 'video/mp4' : 'image/jpeg');
+      await sendConversationAttachment(
+        {
+          conversationKey,
+          recipientLookup: convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey,
+          user: convo.user
+        },
+        {
+          uri: asset.uri,
+          fileName: asset.fileName || asset.uri.split('/').pop() || `kryno-${asset.type === 'video' ? 'video.mp4' : 'photo.jpg'}`,
+          mimeType,
+          mediaKind: asset.type === 'video' ? 'video' : 'image'
+        }
+      );
+    } catch (error) {
+      Alert.alert('Media failed', error instanceof Error ? error.message : 'Unable to attach media right now.');
+    } finally {
+      setComposerBusy(false);
+    }
+  }, [composerBusy, conversationKey, convo, sendConversationAttachment]);
+
+  const toggleVoiceNote = useCallback(async () => {
+    if (composerBusy) return;
+
+    if (recorderState.isRecording) {
+      setComposerBusy(true);
+      try {
+        await audioRecorder.stop();
+        const seconds = Math.max(1, Math.round(audioRecorder.currentTime || recorderState.durationMillis / 1000 || 1));
+        const uri = audioRecorder.uri || recorderState.url;
+        if (!uri) {
+          throw new Error('Recorder did not return an audio file.');
+        }
+        await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+        await sendConversationAttachment(
+          {
+            conversationKey,
+            recipientLookup: convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey,
+            user: convo.user
+          },
+          {
+            uri,
+            fileName: `voice-${Date.now()}.m4a`,
+            mimeType: 'audio/mp4',
+            mediaKind: 'voice',
+            durationSeconds: seconds
+          }
+        );
+      } catch (error) {
+        Alert.alert('Voice note failed', error instanceof Error ? error.message : 'Unable to send this voice note.');
+      } finally {
+        setComposerBusy(false);
+      }
+      return;
+    }
+
+    setComposerBusy(true);
+    try {
+      const permission = await requestRecordingPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Microphone permission needed', 'Allow microphone access to record a voice note.');
+        return;
+      }
+
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+    } catch (error) {
+      Alert.alert('Recording failed', error instanceof Error ? error.message : 'Unable to start recording.');
+    } finally {
+      setComposerBusy(false);
+    }
+  }, [audioRecorder, composerBusy, conversationKey, convo, recorderState.durationMillis, recorderState.isRecording, sendConversationAttachment]);
 
   const addReaction = (msgId: string, reaction: string) => {
     setMessages(prev => prev.map(m =>
@@ -655,14 +981,22 @@ export default function ChatScreen({ route, navigation }: any) {
           />
 
           {/* ── INPUT BAR ── */}
-          <View style={styles.inputBarWrap}>
+          <View style={[styles.inputBarWrap, { paddingBottom: bottomInputInset }]}>
             <LinearGradient
               colors={['rgba(5,7,15,0)', 'rgba(5,7,15,0.82)', 'rgba(5,7,15,0.97)']}
               style={styles.inputBarFade}
               pointerEvents="none"
             />
             <View style={styles.inputBar}>
-              <TouchableOpacity style={styles.inputActionBtn} activeOpacity={0.8}>
+              <TouchableOpacity
+                style={[styles.inputActionBtn, composerBusy && styles.inputActionBtnDisabled]}
+                onPress={() => void pickChatMedia()}
+                disabled={composerBusy}
+                activeOpacity={0.8}
+                hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel="Add attachment"
+              >
                 <Ionicons name="add" size={20} color={COLORS.textMuted} />
               </TouchableOpacity>
 
@@ -677,27 +1011,92 @@ export default function ChatScreen({ route, navigation }: any) {
                   returnKeyType="send"
                   onSubmitEditing={sendMessage}
                 />
-                <TouchableOpacity style={styles.inputEmojiBtn} activeOpacity={0.7}>
-                  <Ionicons name="happy-outline" size={18} color={COLORS.textMuted} />
+                <TouchableOpacity
+                  style={styles.inputEmojiBtn}
+                  onPress={() => setShowEmojiTray((value) => !value)}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 10, right: 10, bottom: 10, left: 10 }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open emoji picker"
+                >
+                  <Ionicons name="happy-outline" size={18} color={showEmojiTray ? COLORS.primaryLight : COLORS.textMuted} />
                 </TouchableOpacity>
               </View>
 
               {input.trim().length > 0 ? (
-                <TouchableOpacity onPress={sendMessage} activeOpacity={0.85}>
+                <TouchableOpacity
+                  onPress={() => void sendMessage()}
+                  activeOpacity={0.85}
+                  style={styles.sendBtnTouchTarget}
+                  hitSlop={{ top: 10, right: 10, bottom: 10, left: 10 }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Send message"
+                >
                   <LinearGradient
                     colors={['#818CF8', '#6366F1', '#8B5CF6']}
                     start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
                     style={styles.sendBtn}
+                    pointerEvents="none"
                   >
                     <Ionicons name="arrow-up" size={18} color="white" />
                   </LinearGradient>
                 </TouchableOpacity>
               ) : (
-                <TouchableOpacity style={styles.inputActionBtn} activeOpacity={0.8}>
-                  <Ionicons name="mic-outline" size={20} color={COLORS.textMuted} />
+                <TouchableOpacity
+                  style={[
+                    styles.inputActionBtn,
+                    recorderState.isRecording && styles.inputActionBtnRecording,
+                    composerBusy && styles.inputActionBtnDisabled
+                  ]}
+                  onPress={() => void toggleVoiceNote()}
+                  disabled={composerBusy}
+                  activeOpacity={0.8}
+                  hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Record voice message"
+                >
+                  <Ionicons
+                    name={recorderState.isRecording ? 'stop' : 'mic-outline'}
+                    size={20}
+                    color={recorderState.isRecording ? COLORS.white : COLORS.textMuted}
+                  />
                 </TouchableOpacity>
               )}
             </View>
+            {recorderState.isRecording && (
+              <View style={styles.recordingStrip}>
+                <View style={styles.recordingDot} />
+                <View style={styles.recordingWave}>
+                  {Array.from({ length: 12 }).map((_, index) => (
+                    <View
+                      key={`recording-wave-${index}`}
+                      style={[
+                        styles.recordingWaveBar,
+                        { height: 8 + ((index * 7 + Math.round(recorderState.durationMillis / 120)) % 18) }
+                      ]}
+                    />
+                  ))}
+                </View>
+                <Text style={styles.recordingText}>{formatDuration(recorderState.durationMillis / 1000)}</Text>
+                <Text style={styles.recordingHint}>Tap stop to send</Text>
+              </View>
+            )}
+            {showEmojiTray && (
+              <View style={styles.emojiTray}>
+                {QUICK_EMOJIS.map((emoji) => (
+                  <TouchableOpacity
+                    key={emoji}
+                    style={styles.emojiChoice}
+                    onPress={() => setInput((value) => `${value}${emoji}`)}
+                    activeOpacity={0.72}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Insert ${emoji}`}
+                  >
+                    <Text style={styles.emojiChoiceText}>{emoji}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
           </View>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -767,7 +1166,7 @@ const styles = StyleSheet.create({
 
   // Call buttons
   callBtnWrap: {
-    position: 'relative', width: 36, height: 36,
+    position: 'relative', width: 48, height: 48,
     alignItems: 'center', justifyContent: 'center',
   },
   callBtnHalo: {
@@ -775,14 +1174,14 @@ const styles = StyleSheet.create({
     width: 48, height: 48, borderRadius: 24,
   },
   callBtnGrad: {
-    width: 36, height: 36, borderRadius: 11,
+    width: 40, height: 40, borderRadius: 13,
     alignItems: 'center', justifyContent: 'center',
     borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
   },
 
   // Three-dot button
   threeDotBtn: {
-    width: 36, height: 36, borderRadius: 11,
+    width: 48, height: 48, borderRadius: 15,
     backgroundColor: 'rgba(255,255,255,0.065)',
     borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
     alignItems: 'center', justifyContent: 'center',
@@ -857,6 +1256,61 @@ const styles = StyleSheet.create({
   msgTextThem: { fontSize: FONTS.base, color: COLORS.text,  lineHeight: 22, letterSpacing: 0.1 },
   msgTime:     { fontSize: 11, color: COLORS.textMuted, marginTop: 2, letterSpacing: 0.2 },
   msgTimeMe:   { textAlign: 'right' },
+  voiceBubble: {
+    minWidth: 190,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  voiceBubbleMe: {},
+  voicePlayBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  voiceBody: { flex: 1, gap: 6 },
+  waveform: {
+    height: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+  },
+  waveBar: {
+    width: 3,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+  },
+  voiceMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  voiceDuration: { color: 'rgba(255,255,255,0.82)', fontSize: 11, fontWeight: FONTS.semibold },
+  voiceFailed: { color: COLORS.pink, fontSize: 11, fontWeight: FONTS.bold },
+  mediaBubble: {
+    width: Math.min(230, width * 0.58),
+    aspectRatio: 0.9,
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.08)'
+  },
+  mediaBubbleMe: {},
+  mediaPreview: { width: '100%', height: '100%' },
+  fileBubble: {
+    minWidth: 190,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 2,
+  },
+  fileBubbleMe: {},
+  fileTitle: { color: COLORS.text, fontSize: FONTS.sm, fontWeight: FONTS.bold },
+  fileName: { color: COLORS.textMuted, fontSize: FONTS.xs, marginTop: 2 },
 
   msgReactions:   { flexDirection: 'row', gap: 4, marginTop: 2 },
   msgReactionsMe: { justifyContent: 'flex-end' },
@@ -903,10 +1357,17 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.055)',
   },
   inputActionBtn: {
-    width: 38, height: 38, borderRadius: 12,
+    width: 48, height: 48, borderRadius: 15,
     backgroundColor: 'rgba(255,255,255,0.07)',
     borderWidth: 1, borderColor: 'rgba(255,255,255,0.09)',
     alignItems: 'center', justifyContent: 'center',
+  },
+  inputActionBtnDisabled: {
+    opacity: 0.45,
+  },
+  inputActionBtnRecording: {
+    backgroundColor: 'rgba(236,72,153,0.72)',
+    borderColor: 'rgba(236,72,153,0.95)',
   },
   inputWrap: {
     flex: 1, flexDirection: 'row', alignItems: 'flex-end',
@@ -916,7 +1377,81 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14, paddingVertical: 10, gap: 8,
   },
   input: { flex: 1, fontSize: FONTS.base, color: COLORS.text, maxHeight: 100, lineHeight: 20 },
-  inputEmojiBtn: { paddingBottom: 2 },
+  inputEmojiBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: -4,
+  },
+  emojiTray: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingHorizontal: SPACE.md,
+    paddingTop: 10,
+    paddingBottom: 8,
+    backgroundColor: 'rgba(5,7,15,0.97)',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.06)',
+  },
+  emojiChoice: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  emojiChoiceText: { fontSize: 22 },
+  recordingStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: SPACE.md,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(236,72,153,0.16)',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(236,72,153,0.22)',
+  },
+  recordingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.pink,
+  },
+  recordingText: {
+    color: COLORS.text,
+    fontSize: FONTS.sm,
+    fontWeight: FONTS.bold,
+    minWidth: 42,
+  },
+  recordingHint: {
+    color: COLORS.textMuted,
+    fontSize: FONTS.xs,
+    fontWeight: FONTS.semibold,
+  },
+  recordingWave: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    flex: 1,
+    minHeight: 28,
+  },
+  recordingWaveBar: {
+    width: 4,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.82)',
+  },
+  sendBtnTouchTarget: {
+    width: 48,
+    height: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   sendBtn: {
     width: 38, height: 38, borderRadius: 12,
     alignItems: 'center', justifyContent: 'center',
