@@ -1,9 +1,9 @@
 import React from 'react';
-import { ActivityIndicator, View, Text, StyleSheet, Platform } from 'react-native';
+import { ActivityIndicator, Pressable, View, Text, StyleSheet, Platform } from 'react-native';
 import { DarkTheme, NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -14,8 +14,8 @@ import MessagesScreen from './screens/MessagesScreen';
 import ChatScreen from './screens/ChatScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import PublicProfileScreen from './screens/PublicProfileScreen';
+import MembershipScreen from './screens/MembershipScreen';
 import AuthScreen from './screens/AuthScreen';
-import CallOverlay from './components/CallOverlay';
 import { COLORS, FONTS } from './lib/theme';
 import { KrynoBackendProvider, useKrynoBackend } from './lib/krynoBackend';
 import { captureMobileException, initMobileObservability } from './lib/observability';
@@ -23,7 +23,7 @@ import { captureMobileException, initMobileObservability } from './lib/observabi
 initMobileObservability();
 
 const Tab = createBottomTabNavigator();
-const Stack = createNativeStackNavigator();
+const MessagesStackNavigator = createNativeStackNavigator();
 
 const krynoNavigationTheme = {
   ...DarkTheme,
@@ -72,15 +72,29 @@ class AppErrorBoundary extends React.Component<
 // ─── MESSAGES STACK ──────────────────────────────────────────────────────────
 function MessagesStack() {
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="MessagesList" component={MessagesScreen} />
-      <Stack.Screen name="Chat" component={ChatScreen} />
-    </Stack.Navigator>
+    <MessagesStackNavigator.Navigator screenOptions={{ headerShown: false, animation: 'none' }}>
+      <MessagesStackNavigator.Screen name="MessagesList" component={MessagesScreen} />
+      <MessagesStackNavigator.Screen name="Chat" component={ChatScreen} />
+    </MessagesStackNavigator.Navigator>
   );
 }
 
 // ─── PREMIUM TAB BAR (hidden on Chat screen) ────────────────────────────────
 function KrynoTabBar({ state, navigation }: any) {
+  const insets = useSafeAreaInsets();
+  const bottomInset = Math.max(insets.bottom + 8, Platform.OS === 'android' ? 38 : 26);
+  const tabsByName: Record<string, { icon: string; iconActive: string; label: string }> = {
+    Feed: { icon: 'home-outline', iconActive: 'home', label: 'Home' },
+    Discover: { icon: 'compass-outline', iconActive: 'compass', label: 'Discover' },
+    Messages: { icon: 'chatbubble-outline', iconActive: 'chatbubble', label: 'Messages' },
+    Profile: { icon: 'person-outline', iconActive: 'person', label: 'Profile' },
+  };
+  const activeRoute = state.routes[state.index];
+
+  if (!tabsByName[activeRoute?.name]) {
+    return null;
+  }
+
   // Detect if we're deep inside the Messages stack on the Chat screen
   const messagesRoute = state.routes.find((r: any) => r.name === 'Messages');
   const isInChat =
@@ -89,33 +103,48 @@ function KrynoTabBar({ state, navigation }: any) {
 
   if (isInChat) return null;
 
-  const tabs = [
-    { name: 'Feed', icon: 'home-outline', iconActive: 'home', label: 'Home' },
-    { name: 'Discover', icon: 'compass-outline', iconActive: 'compass', label: 'Discover' },
-    { name: 'Messages', icon: 'chatbubble-outline', iconActive: 'chatbubble', label: 'Messages' },
-    { name: 'Profile', icon: 'person-outline', iconActive: 'person', label: 'Profile' },
-  ];
+  const visibleRoutes = state.routes
+    .map((route: any, index: number) => ({ route, index, tab: tabsByName[route.name] }))
+    .filter((entry: any) => !!entry.tab);
 
   return (
     <View style={tabStyles.wrapper} pointerEvents="box-none">
       {/* Fade gradient behind tab bar */}
       <LinearGradient
         colors={['rgba(5,7,15,0)', 'rgba(5,7,15,1)']}
-        style={tabStyles.fadeGrad}
+        style={[tabStyles.fadeGrad, { height: 90 + bottomInset }]}
         pointerEvents="none"
       />
-      <View style={tabStyles.container}>
+      <View style={[tabStyles.container, { paddingBottom: bottomInset }]}>
         <LinearGradient
           colors={['rgba(14,17,30,0.92)', 'rgba(8,10,20,0.96)']}
           style={tabStyles.bar}
+          pointerEvents="box-none"
         >
-          {state.routes.map((route: any, index: number) => {
+          {visibleRoutes.map(({ route, index, tab }: any) => {
             const focused = state.index === index;
-            const tab = tabs[index];
             const hasUnread = route.name === 'Messages';
 
             return (
-              <View key={route.key} style={tabStyles.tabItem}>
+              <Pressable
+                key={route.key}
+                style={tabStyles.tabItem}
+                onPress={() => {
+                  const event = navigation.emit({
+                    type: 'tabPress',
+                    target: route.key,
+                    canPreventDefault: true,
+                  });
+
+                  if (!focused && !event.defaultPrevented) {
+                    navigation.navigate(route.name);
+                  }
+                }}
+                hitSlop={{ top: 14, right: 6, bottom: 14, left: 6 }}
+                android_ripple={{ color: 'rgba(99,102,241,0.18)', borderless: false }}
+                accessibilityRole="button"
+                accessibilityLabel={`${tab.label} tab`}
+              >
                 <View style={[tabStyles.tabBtn, focused && tabStyles.tabBtnActive]}>
                   {focused && (
                     <LinearGradient
@@ -127,14 +156,13 @@ function KrynoTabBar({ state, navigation }: any) {
                     name={(focused ? tab.iconActive : tab.icon) as any}
                     size={22}
                     color={focused ? COLORS.primary : COLORS.textMuted}
-                    onPress={() => navigation.navigate(route.name)}
                   />
                   {hasUnread && !focused && <View style={tabStyles.badge} />}
                 </View>
                 <Text style={[tabStyles.label, focused && tabStyles.labelActive]}>
                   {tab.label}
                 </Text>
-              </View>
+              </Pressable>
             );
           })}
         </LinearGradient>
@@ -146,6 +174,7 @@ function KrynoTabBar({ state, navigation }: any) {
 function MainTabs() {
   return (
     <Tab.Navigator
+      detachInactiveScreens={false}
       tabBar={(props) => <KrynoTabBar {...props} />}
       screenOptions={{ headerShown: false }}
     >
@@ -153,12 +182,84 @@ function MainTabs() {
       <Tab.Screen name="Discover" component={DiscoverScreen} />
       <Tab.Screen name="Messages" component={MessagesStack} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
+      <Tab.Screen name="PublicProfile" component={PublicProfileScreen} />
+      <Tab.Screen name="Membership" component={MembershipScreen} />
     </Tab.Navigator>
   );
 }
 
+function SafeCallOverlayHost() {
+  const { currentCall, endCurrentCall } = useKrynoBackend();
+  const [Overlay, setOverlay] = React.useState<React.ComponentType | null>(null);
+  const [loadError, setLoadError] = React.useState('');
+
+  React.useEffect(() => {
+    if (!currentCall || Overlay || loadError) {
+      return;
+    }
+
+    let cancelled = false;
+    console.log('[KrynoStartup] call overlay loading');
+
+    void import('./components/CallOverlay')
+      .then((module) => {
+        if (cancelled) {
+          return;
+        }
+
+        setOverlay(() => module.default);
+        console.log('[KrynoStartup] call overlay ready');
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : 'Call UI failed to load.';
+        setLoadError(message);
+        console.warn('[KrynoStartup] call overlay failed', message);
+        captureMobileException(error instanceof Error ? error : new Error(message), { surface: 'CallOverlayHost' });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentCall, Overlay, loadError]);
+
+  if (!currentCall) {
+    return null;
+  }
+
+  if (Overlay) {
+    return <Overlay />;
+  }
+
+  if (!loadError) {
+    return null;
+  }
+
+  return (
+    <View style={appStyles.callFallback} pointerEvents="box-none">
+      <View style={appStyles.callFallbackPanel}>
+        <Text style={appStyles.callFallbackTitle}>Call unavailable</Text>
+        <Text style={appStyles.callFallbackText}>{loadError}</Text>
+        <Pressable style={appStyles.callFallbackButton} onPress={() => void endCurrentCall('call_ui_failed')}>
+          <Text style={appStyles.callFallbackButtonText}>Dismiss</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 function AppShell() {
-  const { initialized, session } = useKrynoBackend();
+  const { initialized, session, foregroundNotice, dismissForegroundNotice } = useKrynoBackend();
+
+  React.useEffect(() => {
+    console.log(
+      '[KrynoStartup] app shell state',
+      initialized ? (session ? 'authenticated' : 'signed_out') : 'initializing'
+    );
+  }, [initialized, session]);
 
   if (!initialized) {
     return (
@@ -175,23 +276,43 @@ function AppShell() {
 
   return (
     <View style={appStyles.appSurface}>
-      <Stack.Navigator screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="MainTabs" component={MainTabs} />
-        <Stack.Screen name="PublicProfile" component={PublicProfileScreen} />
-      </Stack.Navigator>
-      <CallOverlay />
+      <MainTabs />
+      {foregroundNotice && (
+        <Pressable
+          style={appStyles.foregroundNotice}
+          onPress={dismissForegroundNotice}
+          hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+          accessibilityRole="button"
+          accessibilityLabel="Dismiss Kryno notification"
+        >
+          <Text style={appStyles.foregroundNoticeTitle}>{foregroundNotice.title}</Text>
+          <Text style={appStyles.foregroundNoticeText}>{foregroundNotice.body}</Text>
+        </Pressable>
+      )}
+      <SafeCallOverlayHost />
     </View>
   );
 }
 
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App() {
+  React.useEffect(() => {
+    console.log('[KrynoStartup] app mounted');
+  }, []);
+
   return (
     <GestureHandlerRootView style={appStyles.appSurface}>
       <SafeAreaProvider>
         <AppErrorBoundary>
           <KrynoBackendProvider>
-            <NavigationContainer theme={krynoNavigationTheme}>
+            <NavigationContainer
+              theme={krynoNavigationTheme}
+              onReady={() => console.log('[KrynoStartup] navigation ready')}
+              onStateChange={(state) => {
+                const route = state?.routes?.[state.index ?? 0];
+                console.log('[KrynoStartup] navigation state', route?.name ?? 'unknown');
+              }}
+            >
               <AppShell />
             </NavigationContainer>
           </KrynoBackendProvider>
@@ -207,6 +328,8 @@ const tabStyles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
+    zIndex: 500,
+    elevation: 500,
   },
   fadeGrad: {
     position: 'absolute',
@@ -216,15 +339,15 @@ const tabStyles = StyleSheet.create({
     height: 90,
   },
   container: {
-    paddingHorizontal: 14,
-    paddingBottom: Platform.OS === 'ios' ? 22 : 14,
-    paddingTop: 6,
+    paddingHorizontal: 12,
+    paddingTop: 12,
   },
   bar: {
     flexDirection: 'row',
-    borderRadius: 26,
-    paddingVertical: 8,
-    paddingHorizontal: 6,
+    borderRadius: 28,
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    minHeight: 96,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.09)',
     shadowColor: '#000',
@@ -236,12 +359,16 @@ const tabStyles = StyleSheet.create({
   tabItem: {
     flex: 1,
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 3,
+    minHeight: 76,
+    borderRadius: 22,
+    paddingVertical: 6,
   },
   tabBtn: {
-    width: 48,
-    height: 38,
-    borderRadius: 14,
+    width: 62,
+    height: 54,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
@@ -340,5 +467,70 @@ const appStyles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  callFallback: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  callFallbackPanel: {
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(12,15,28,0.96)',
+    padding: 18,
+    gap: 10,
+  },
+  callFallbackTitle: {
+    color: COLORS.text,
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  callFallbackText: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  callFallbackButton: {
+    alignSelf: 'flex-end',
+    borderRadius: 999,
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+  },
+  callFallbackButtonText: {
+    color: COLORS.white,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  foregroundNotice: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    top: Platform.OS === 'ios' ? 58 : 28,
+    zIndex: 80,
+    elevation: 80,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(139,92,246,0.36)',
+    backgroundColor: 'rgba(12,15,28,0.98)',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    shadowColor: '#6366F1',
+    shadowOpacity: 0.26,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+  },
+  foregroundNoticeTitle: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  foregroundNoticeText: {
+    marginTop: 3,
+    color: COLORS.textMuted,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '600',
   },
 });
