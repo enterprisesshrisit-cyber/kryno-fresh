@@ -2,6 +2,12 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as FileSystem from 'expo-file-system/legacy';
+import {
+  clearKrynoNotifications,
+  registerKrynoPushToken,
+  showForegroundCallNotification,
+  showForegroundMessageNotification
+} from './mobileNotifications';
 import { DISCOVER_CATEGORIES, DISCOVER_POSTS, FEATURED_MEMBERS, FEED_POSTS, ME, PROFILE_POSTS, STORIES } from './data';
 import type { MobileCallMode, MobileIceConfig } from './mobileCall';
 
@@ -173,7 +179,13 @@ type ChatMessageModel = (typeof import('./data').MESSAGES)[number] & {
   conversationKey: string;
   createdAt: string;
   remoteMessageId?: string;
-  status?: 'sending' | 'sent' | 'failed' | 'received';
+  status?: 'sending' | 'sent' | 'delivered' | 'seen' | 'failed' | 'received';
+  kind?: 'text' | 'attachment';
+  mediaKind?: 'voice' | 'image' | 'video' | 'file';
+  localUri?: string;
+  fileName?: string;
+  mimeType?: string;
+  durationSeconds?: number;
 };
 type CallStateModel = {
   callId: string;
@@ -208,10 +220,16 @@ type MobileSignalMessage = {
   id: string;
   conversationKey: string;
   direction: 'incoming' | 'outgoing';
-  kind: 'text';
+  kind: 'text' | 'attachment';
   text: string;
+  mediaKind?: 'voice' | 'image' | 'video' | 'file';
+  localUri?: string;
+  fileName?: string;
+  mimeType?: string;
+  durationSeconds?: number;
   createdAt: string;
   senderLabel: string;
+  status?: 'sent' | 'delivered' | 'seen' | 'received' | 'failed';
 };
 
 type MobileSignalCallMediaKey = {
@@ -307,6 +325,16 @@ type KrynoBackendContextValue = {
   conversationSeeds: ConversationSeed[];
   getConversationMessages: (conversationKey: string) => ChatMessageModel[];
   sendConversationMessage: (conversation: Pick<ConversationSeed, 'conversationKey' | 'recipientLookup' | 'user'>, text: string) => Promise<void>;
+  sendConversationAttachment: (
+    conversation: Pick<ConversationSeed, 'conversationKey' | 'recipientLookup' | 'user'>,
+    input: {
+      uri: string;
+      fileName: string;
+      mimeType: string;
+      mediaKind?: 'voice' | 'image' | 'video' | 'file';
+      durationSeconds?: number;
+    }
+  ) => Promise<void>;
   ensureConversationForUser: (user: SearchUser) => ConversationSeed;
   markConversationRead: (conversationKey: string) => void;
   currentCall: CallStateModel | null;
@@ -320,6 +348,8 @@ type KrynoBackendContextValue = {
   toggleCurrentCallMute: () => void;
   toggleCurrentCallCamera: () => void;
   updateCurrentCallTransport: (input: { phase?: CallStateModel['phase']; status: string; connectedAt?: string }) => void;
+  foregroundNotice: { title: string; body: string; createdAt: string } | null;
+  dismissForegroundNotice: () => void;
   searchUsers: (query: string) => Promise<SearchUser[]>;
   getSocialProfile: (username: string) => Promise<SocialProfile>;
   togglePostLike: (postId: string) => Promise<void>;
@@ -344,6 +374,13 @@ type KrynoBackendContextValue = {
     caption?: string;
   }) => Promise<void>;
   viewStory: (storyId: string) => Promise<void>;
+};
+
+type PushTokenRegistrationResponse = {
+  ok: boolean;
+  provider: string;
+  platform: string;
+  tokenUpdatedAt: string;
 };
 
 const SESSION_STORAGE_KEY = 'kryno_mobile_auth_session';
@@ -557,6 +594,25 @@ function createUuid() {
   });
 }
 
+function isAccessTokenExpiredError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /access token expired|please refresh your session/i.test(message);
+}
+
+function getRateLimitRetrySeconds(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const match = message.match(/retry in\s+(\d+)\s+seconds?/i);
+  if (!/rate limit/i.test(message) || !match) {
+    return null;
+  }
+
+  return Math.min(Math.max(Number(match[1]) || 1, 1), 8);
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function loadStoredJson<T>(key: string, fallback: T) {
   const stored = await AsyncStorage.getItem(key);
   if (!stored) {
@@ -733,6 +789,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const [currentCall, setCurrentCall] = useState<CallStateModel | null>(null);
   const [localCallStreamUrl, setLocalCallStreamUrl] = useState<string | null>(null);
   const [remoteCallStreamUrl, setRemoteCallStreamUrl] = useState<string | null>(null);
+  const [foregroundNotice, setForegroundNotice] = useState<{ title: string; body: string; createdAt: string } | null>(null);
   const sessionRef = useRef<AuthSession | null>(null);
   const seenInboxRef = useRef<Set<string>>(new Set());
   const knownUsersRef = useRef<Record<string, KnownChatUser>>({});
@@ -765,6 +822,36 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     currentCallRef.current = currentCall;
   }, [currentCall]);
 
+  const refreshAuthSession = useCallback(async () => {
+    const apiOrigin = requireBackendOrigin(backendOrigin);
+    const activeSession = sessionRef.current;
+
+    if (!activeSession || !deviceProfile) {
+      throw new Error('Please sign in again to continue.');
+    }
+
+    const refreshResponse = await fetchWithTimeout(`${apiOrigin}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        refresh_token: activeSession.refreshToken,
+        device_id: deviceProfile.deviceId
+      })
+    });
+
+    const refreshed = await parseJsonResponse<{ accessToken: string; refreshToken: string }>(refreshResponse);
+    const nextSession = {
+      ...activeSession,
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken
+    };
+
+    setSession(nextSession);
+    await secureSet(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
+    sessionRef.current = nextSession;
+    return nextSession;
+  }, [backendOrigin, deviceProfile]);
+
   const apiFetch = useCallback(
     async <T,>(path: string, init: ApiFetchInit = {}, allowRefresh = true): Promise<T> => {
       const apiOrigin = requireBackendOrigin(backendOrigin);
@@ -792,32 +879,13 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       }, timeoutMs ?? 20_000);
 
       if (response.status === 401 && allowRefresh && activeSession && deviceProfile) {
-        const refreshResponse = await fetchWithTimeout(`${apiOrigin}/api/auth/refresh`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            refresh_token: activeSession.refreshToken,
-            device_id: deviceProfile.deviceId
-          })
-        });
-
-        const refreshed = await parseJsonResponse<{ accessToken: string; refreshToken: string }>(refreshResponse);
-        const nextSession = {
-          ...activeSession,
-          accessToken: refreshed.accessToken,
-          refreshToken: refreshed.refreshToken
-        };
-
-        setSession(nextSession);
-        await secureSet(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
-        sessionRef.current = nextSession;
-
+        await refreshAuthSession();
         return apiFetch<T>(path, init, false);
       }
 
       return parseJsonResponse<T>(response);
     },
-    [backendOrigin, deviceProfile]
+    [backendOrigin, deviceProfile, refreshAuthSession]
   );
 
   const upsertKnownUsers = useCallback((entries: KnownChatUser[]) => {
@@ -873,6 +941,23 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         }
       ].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
     );
+  }, []);
+
+  const dismissForegroundNotice = useCallback(() => {
+    setForegroundNotice(null);
+  }, []);
+
+  const showInAppMessageNotice = useCallback((senderLabel?: string) => {
+    const body = senderLabel ? `${senderLabel} sent you a private message.` : 'You have a new private message.';
+    setForegroundNotice({
+      title: 'New Kryno message',
+      body,
+      createdAt: new Date().toISOString()
+    });
+
+    setTimeout(() => {
+      setForegroundNotice((current) => (current?.body === body ? null : current));
+    }, 4500);
   }, []);
 
   const teardownCallMedia = useCallback(() => {
@@ -984,12 +1069,12 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
                   status:
                     state === 'connected'
                       ? current.mode === 'video'
-                        ? 'Encrypted video call live.'
-                        : 'Encrypted audio call live.'
+                        ? 'Video call live.'
+                        : 'Audio call live.'
                       : state === 'connecting'
-                        ? 'Joining encrypted call...'
+                        ? 'Joining call...'
                         : state === 'disconnected' || state === 'failed'
-                          ? 'Reconnecting secure media...'
+                          ? 'Reconnecting call media...'
                           : current.status,
                   connectedAt: state === 'connected' ? current.connectedAt ?? new Date().toISOString() : current.connectedAt
                 }
@@ -1045,13 +1130,31 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
             online: nextUser.online,
             mood: nextUser.mood
           },
-          lastMessage: entry.text,
+          lastMessage:
+            entry.kind === 'attachment'
+              ? entry.mediaKind === 'voice'
+                ? 'Voice message'
+                : entry.mediaKind === 'image'
+                  ? 'Photo'
+                  : entry.mediaKind === 'video'
+                    ? 'Video'
+                    : 'Encrypted file'
+              : entry.text,
           time: formatTimeAgo(entry.createdAt),
           unread: existingThread?.unread ?? 0,
           pinned: existingThread?.pinned ?? false
         };
 
-        thread.lastMessage = entry.text;
+        thread.lastMessage =
+          entry.kind === 'attachment'
+            ? entry.mediaKind === 'voice'
+              ? 'Voice message'
+              : entry.mediaKind === 'image'
+                ? 'Photo'
+                : entry.mediaKind === 'video'
+                  ? 'Video'
+                  : 'Encrypted file'
+            : entry.text;
         thread.time = formatTimeAgo(entry.createdAt);
         if (options.markUnread && entry.direction === 'incoming') {
           thread.unread += 1;
@@ -1076,7 +1179,13 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
               createdAt: entry.createdAt,
               reactions: [],
               remoteMessageId: entry.id,
-              status: (entry.direction === 'outgoing' ? 'sent' : 'received') as 'sent' | 'received'
+              status: entry.status ?? (entry.direction === 'outgoing' ? 'sent' : 'received'),
+              kind: (entry.kind === 'attachment' ? 'attachment' : 'text') as 'text' | 'attachment',
+              mediaKind: entry.mediaKind,
+              localUri: entry.localUri,
+              fileName: entry.fileName,
+              mimeType: entry.mimeType,
+              durationSeconds: entry.durationSeconds
             }))
         ];
 
@@ -1206,7 +1315,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         mediaEncryptionKey: message.mediaEncryptionKey,
         status:
           current.liveKitToken && current.phase !== 'ringing'
-            ? 'Encrypted media key received. Joining secure call...'
+            ? 'Call media key received. Joining call...'
             : current.status
       };
     });
@@ -1236,10 +1345,13 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     const callMediaKeys = unseen.filter((entry): entry is MobileSignalCallMediaKey => entry.kind === 'call_media_key');
     if (textMessages.length > 0) {
       ingestSignalMessages(textMessages, { markUnread: true });
+      const latest = textMessages[textMessages.length - 1];
+      showInAppMessageNotice(latest.senderLabel);
+      void showForegroundMessageNotification({ senderLabel: latest.senderLabel }).catch(() => undefined);
     }
     callMediaKeys.forEach(applyCallMediaKey);
     setSeenInboxMessageIds((current) => [...new Set([...current, ...unseen.map((entry) => entry.id)])]);
-  }, [applyCallMediaKey, backendOrigin, deviceProfile, ingestSignalMessages]);
+  }, [applyCallMediaKey, backendOrigin, deviceProfile, ingestSignalMessages, showInAppMessageNotice]);
 
   const loadSocialState = useCallback(async () => {
     if (!sessionRef.current) {
@@ -1501,7 +1613,10 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
             if (message.kind === 'call_media_key') {
               applyCallMediaKey(message as MobileSignalCallMediaKey);
             } else {
-              ingestSignalMessages([message as MobileSignalMessage], { markUnread: true });
+              const textMessage = message as MobileSignalMessage;
+              ingestSignalMessages([textMessage], { markUnread: true });
+              showInAppMessageNotice(textMessage.senderLabel);
+              void showForegroundMessageNotification({ senderLabel: textMessage.senderLabel }).catch(() => undefined);
             }
             setSeenInboxMessageIds((current) => [...new Set([...current, message.id])]);
           },
@@ -1533,7 +1648,43 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       relayHandleRef.current?.disconnect();
       relayHandleRef.current = null;
     };
-  }, [applyCallMediaKey, backendOrigin, deviceProfile, ingestSignalMessages, initialized, session]);
+  }, [applyCallMediaKey, backendOrigin, deviceProfile, ingestSignalMessages, initialized, session, showInAppMessageNotice]);
+
+  useEffect(() => {
+    if (!initialized || !session || !deviceProfile) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const registration = await registerKrynoPushToken();
+        if (cancelled || !registration) {
+          return;
+        }
+
+        await apiFetch<PushTokenRegistrationResponse>('/devices/push-token', {
+          method: 'POST',
+          body: JSON.stringify({
+            provider: registration.provider,
+            pushToken: registration.token,
+            platform: registration.platform,
+            deviceId: deviceProfile.deviceId
+          })
+        });
+        console.log('[KrynoNotifications] push token synced');
+      } catch (notificationError) {
+        const message =
+          notificationError instanceof Error ? notificationError.message : 'push notification setup failed';
+        console.warn('[KrynoNotifications] setup failed', message);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiFetch, deviceProfile, initialized, session]);
 
   const setBackendOrigin = useCallback(async (value: string) => {
     if (BUILD_LOCKED_BACKEND_ORIGIN) {
@@ -1846,11 +1997,6 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           const conversationKey = event.callerUsername;
           const mediaProvider = event.mediaProvider === 'livekit' ? 'livekit' : 'webrtc';
           const roomName = typeof event.roomName === 'string' ? event.roomName : null;
-          const pendingMediaKey = pendingCallMediaKeysRef.current.get(event.callId);
-          const mediaEncryptionKey =
-            pendingMediaKey && (!roomName || pendingMediaKey.roomName === roomName)
-              ? pendingMediaKey.mediaEncryptionKey
-              : null;
           const knownUser =
             knownUsersRef.current[event.callerUsername] ??
             Object.values(knownUsersRef.current).find((entry) => entry.username === event.callerUsername);
@@ -1876,6 +2022,11 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
             });
           }
 
+          void showForegroundCallNotification({
+            callerLabel: knownUser?.displayName ?? event.callerUsername,
+            mode: event.mode === 'video' ? 'video' : 'audio'
+          }).catch(() => undefined);
+
           setCurrentCall({
             callId: event.callId,
             conversationKey,
@@ -1885,17 +2036,15 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
             mediaProvider,
             roomName,
             liveKitToken: null,
-            mediaEncryptionKey,
+            mediaEncryptionKey: null,
             remoteLabel: knownUser?.displayName ?? event.callerUsername,
             remoteSessionId: event.callerSessionId,
             muted: false,
             cameraEnabled: event.mode === 'video',
             status:
-              mediaProvider === 'livekit' && !mediaEncryptionKey
-                ? 'Incoming call. Waiting for encrypted media key...'
-                : event.mode === 'video'
-                  ? 'Incoming encrypted video call'
-                  : 'Incoming encrypted audio call',
+              event.mode === 'video'
+                ? 'Incoming video call'
+                : 'Incoming audio call',
             startedAt: new Date().toISOString()
           });
           break;
@@ -1908,7 +2057,9 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
                   phase: 'ringing',
                   mediaProvider: event.mediaProvider === 'livekit' ? 'livekit' : current.mediaProvider,
                   roomName: typeof event.roomName === 'string' ? event.roomName : current.roomName,
-                  status: `Ringing ${event.recipientUsername}...`
+                  status: event.waitingForAppOpen
+                    ? `Calling ${event.recipientUsername}. Waiting for them to open Kryno...`
+                    : `Ringing ${event.recipientUsername}...`
                 }
               : current
           );
@@ -1946,9 +2097,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
                       roomName,
                       liveKitToken: token,
                       remoteSessionId: event.peerSessionId,
-                      status: current.mediaEncryptionKey
-                        ? 'Joining managed encrypted media room...'
-                        : 'Waiting for encrypted media key...'
+                      status: 'Joining LiveKit media room...'
                     }
                   : current
               );
@@ -1969,7 +2118,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
                   phase: 'connecting',
                   mediaProvider: 'webrtc',
                   remoteSessionId: event.peerSessionId,
-                  status: 'Joining encrypted call...'
+                  status: 'Joining call...'
                 }
               : current
           );
@@ -1998,9 +2147,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
                       roomName,
                       liveKitToken: token,
                       remoteSessionId: event.peerSessionId,
-                      status: current.mediaEncryptionKey
-                        ? 'Joining managed encrypted media room...'
-                        : 'Waiting for encrypted media key...'
+                      status: 'Joining LiveKit media room...'
                     }
                   : current
               );
@@ -2024,10 +2171,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
                   remoteSessionId: event.peerSessionId,
                   status:
                     mediaProvider === 'livekit'
-                      ? current.mediaEncryptionKey
-                        ? 'Joining managed encrypted media room...'
-                        : 'Waiting for encrypted media key...'
-                      : 'Waiting for secure media handshake...'
+                      ? 'Joining LiveKit media room...'
+                      : 'Waiting for media handshake...'
                 }
               : current
           );
@@ -2080,6 +2225,21 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         case 'call_ended':
           finishCurrentCall(`Call ended: ${event.reason.replaceAll('_', ' ')}`);
           break;
+        case 'message_seen':
+          if (typeof event.conversationKey !== 'string') {
+            return;
+          }
+          setChatMessages((current) =>
+            current.map((entry) =>
+              entry.conversationKey === event.conversationKey && entry.from === 'me'
+                ? {
+                    ...entry,
+                    status: 'seen'
+                  }
+                : entry
+            )
+          );
+          break;
       }
     },
     [
@@ -2116,9 +2276,6 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       let liveKitToken: LiveKitCallToken | null = null;
       let mediaEncryptionKey: string | null = null;
 
-      const signalModule = await getMobileSignalModule();
-      mediaEncryptionKey = signalModule.createCallMediaEncryptionKey();
-
       try {
         liveKitToken = await createLiveKitCallToken({
           mode,
@@ -2130,21 +2287,6 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         mediaEncryptionKey = null;
         await fetchIceConfig();
         await prepareLocalCallMedia(mode, false, mode === 'video');
-      }
-
-      if (mediaProvider === 'livekit' && mediaEncryptionKey) {
-        await signalModule.sendMobileDirectCallMediaKey(
-          requireBackendOrigin(backendOrigin),
-          sessionRef.current,
-          deviceProfile,
-          conversation.recipientLookup,
-          {
-            callId,
-            mode,
-            roomName,
-            mediaEncryptionKey
-          }
-        );
       }
 
       setCurrentCall({
@@ -2209,9 +2351,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
                 ...current,
                 phase: 'connecting',
                 liveKitToken: token,
-                status: current.mediaEncryptionKey
-                  ? 'Joining managed encrypted media room...'
-                  : 'Waiting for encrypted media key...'
+                status: 'Joining LiveKit media room...'
               }
             : current
         );
@@ -2240,7 +2380,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         ? {
             ...current,
             phase: 'connecting',
-            status: 'Joining encrypted call...'
+            status: 'Joining call...'
           }
         : current
     );
@@ -2405,6 +2545,12 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           : entry
       )
     );
+    relayHandleRef.current?.send({
+      type: 'message_seen',
+      recipientLookup: conversationKey,
+      seenAt: new Date().toISOString()
+    });
+    void clearKrynoNotifications();
   }, []);
 
   const togglePostLike = useCallback(
@@ -2885,20 +3031,101 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
       try {
         const { sendMobileDirectText } = await getMobileSignalModule();
-        const secureMessage = await sendMobileDirectText(
-          requireBackendOrigin(backendOrigin),
-          sessionRef.current,
-          deviceProfile,
-          conversation.recipientLookup,
-          trimmed
-        );
+        let activeSession = sessionRef.current;
+        let secureMessage;
 
-        ingestSignalMessages([secureMessage], { markUnread: false });
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            secureMessage = await sendMobileDirectText(
+              requireBackendOrigin(backendOrigin),
+              activeSession,
+              deviceProfile,
+              conversation.recipientLookup,
+              trimmed
+            );
+            break;
+          } catch (sendError) {
+            if (attempt === 0 && isAccessTokenExpiredError(sendError)) {
+              activeSession = await refreshAuthSession();
+              continue;
+            }
+
+            const retrySeconds = attempt === 0 ? getRateLimitRetrySeconds(sendError) : null;
+            if (retrySeconds) {
+              await wait(retrySeconds * 1000 + 250);
+              activeSession = sessionRef.current ?? activeSession;
+              continue;
+            }
+
+            throw sendError;
+          }
+        }
+
+        if (secureMessage) {
+          ingestSignalMessages([secureMessage], { markUnread: false });
+        }
       } catch (sendError) {
         throw sendError;
       }
     },
-    [backendOrigin, deviceProfile, ingestSignalMessages]
+    [backendOrigin, deviceProfile, ingestSignalMessages, refreshAuthSession]
+  );
+
+  const sendConversationAttachment = useCallback(
+    async (
+      conversation: Pick<ConversationSeed, 'conversationKey' | 'recipientLookup' | 'user'>,
+      input: {
+        uri: string;
+        fileName: string;
+        mimeType: string;
+        mediaKind?: 'voice' | 'image' | 'video' | 'file';
+        durationSeconds?: number;
+      }
+    ) => {
+      if (!input.uri || !sessionRef.current || !deviceProfile) {
+        return;
+      }
+
+      if (STABLE_STARTUP_MODE) {
+        throw new Error('Secure attachments are disabled in this stable startup build while login stability is being verified.');
+      }
+
+      const { sendMobileDirectAttachment } = await getMobileSignalModule();
+      let activeSession = sessionRef.current;
+      let secureMessage;
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          secureMessage = await sendMobileDirectAttachment(
+            requireBackendOrigin(backendOrigin),
+            activeSession,
+            deviceProfile,
+            conversation.recipientLookup,
+            input
+          );
+          break;
+        } catch (sendError) {
+          if (attempt === 0 && isAccessTokenExpiredError(sendError)) {
+            activeSession = await refreshAuthSession();
+            continue;
+          }
+
+          const retrySeconds = attempt === 0 ? getRateLimitRetrySeconds(sendError) : null;
+          if (retrySeconds) {
+            await wait(retrySeconds * 1000 + 250);
+            activeSession = sessionRef.current ?? activeSession;
+            continue;
+          }
+
+          throw sendError;
+        }
+      }
+
+      if (secureMessage) {
+        ingestSignalMessages([secureMessage], { markUnread: false });
+      }
+    },
+    [backendOrigin, deviceProfile, ingestSignalMessages, refreshAuthSession]
   );
 
   const conversationSeeds = useMemo<ConversationSeed[]>(() => {
@@ -2978,6 +3205,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       conversationSeeds,
       getConversationMessages,
       sendConversationMessage,
+      sendConversationAttachment,
       ensureConversationForUser,
       markConversationRead,
       currentCall,
@@ -2991,6 +3219,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       toggleCurrentCallMute,
       toggleCurrentCallCamera,
       updateCurrentCallTransport,
+      foregroundNotice,
+      dismissForegroundNotice,
       searchUsers,
       getSocialProfile,
       togglePostLike,
@@ -3031,6 +3261,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       conversationSeeds,
       getConversationMessages,
       sendConversationMessage,
+      sendConversationAttachment,
       ensureConversationForUser,
       markConversationRead,
       currentCall,
@@ -3044,6 +3275,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       toggleCurrentCallMute,
       toggleCurrentCallCamera,
       updateCurrentCallTransport,
+      foregroundNotice,
+      dismissForegroundNotice,
       searchUsers,
       getSocialProfile,
       togglePostLike,
