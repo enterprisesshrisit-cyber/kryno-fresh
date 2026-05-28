@@ -1,8 +1,10 @@
 import { pool, withTransaction } from '../db/pool.js';
 import { AppError } from '../utils/errors.js';
+import { pushService } from './push.service.js';
 import { relayService } from './relay.service.js';
 
-const MAX_TTL_HOURS = 24;
+const DEFAULT_QUEUE_TTL_HOURS = 24 * 365;
+const MAX_TTL_HOURS = 24 * 365;
 
 type SendMessageInput = {
   messageId: string;
@@ -66,7 +68,7 @@ export class MessagesService {
         }
       }
 
-      const ttlHours = Math.min(Math.max(input.ttlHours ?? MAX_TTL_HOURS, 1), MAX_TTL_HOURS);
+      const ttlHours = Math.min(Math.max(input.ttlHours ?? DEFAULT_QUEUE_TTL_HOURS, 1), MAX_TTL_HOURS);
       const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
       const serverReceivedAt = new Date().toISOString();
 
@@ -88,13 +90,18 @@ export class MessagesService {
       });
 
       if (relayResult.delivered) {
+        const pushResult = await pushService.sendDirectMessageNotification({
+          recipientUserId: recipient.id
+        });
+
         return {
           messageId: input.messageId,
           recipientUserId: recipient.id,
           recipientDeviceSessionId: relayResult.deliveredSessionIds[0] ?? input.recipientDeviceSessionId ?? null,
           serverReceivedAt,
           expiresAt: null,
-          deliveryMode: 'live'
+          deliveryMode: 'live',
+          pushNotification: pushResult
         };
       }
 
@@ -147,6 +154,9 @@ export class MessagesService {
       );
 
       const row = inserted.rows[0];
+      const pushResult = await pushService.sendDirectMessageNotification({
+        recipientUserId: row.recipient_user_id
+      });
 
       return {
         messageId: row.message_id,
@@ -154,7 +164,8 @@ export class MessagesService {
         recipientDeviceSessionId: row.recipient_device_session_id,
         serverReceivedAt: row.server_received_at,
         expiresAt: row.expires_at,
-        deliveryMode: 'queued'
+        deliveryMode: 'queued',
+        pushNotification: pushResult
       };
     });
   }
