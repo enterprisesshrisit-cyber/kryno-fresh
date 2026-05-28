@@ -1,18 +1,56 @@
 import 'react-native-get-random-values';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Buffer } from 'buffer';
+import * as FileSystem from 'expo-file-system/legacy';
 import {
   KeyHelper,
   SessionBuilder,
   SessionCipher,
   SignalProtocolAddress,
+  setWebCrypto,
   type DeviceType,
-  type Direction,
-  type KeyPairType,
   type MessageType,
-  type SessionRecordType,
-  type StorageType
 } from '@privacyresearch/libsignal-protocol-typescript';
+import { fromBase64, SecureSignalStore, toBase64 } from './mobileSignalSecureStore';
+
+declare const require: (moduleName: string) => unknown;
+
+type LibsignalWebCrypto = Crypto & {
+  subtle: SubtleCrypto;
+};
+
+let activeCrypto: LibsignalWebCrypto | null = null;
+
+function installLibsignalWebCryptoFallback() {
+  const nativeCrypto = globalThis.crypto as Crypto | undefined;
+  if (typeof nativeCrypto?.subtle?.importKey === 'function') {
+    activeCrypto = nativeCrypto as LibsignalWebCrypto;
+    return;
+  }
+
+  const fallbackCrypto = require('@privacyresearch/libsignal-protocol-typescript/lib/msrcrypto') as Partial<LibsignalWebCrypto>;
+  if (typeof fallbackCrypto?.subtle?.importKey !== 'function') {
+    throw new Error('Signal crypto runtime is unavailable on this device.');
+  }
+
+  const getRandomValues =
+    typeof nativeCrypto?.getRandomValues === 'function'
+      ? nativeCrypto.getRandomValues.bind(nativeCrypto)
+      : fallbackCrypto.getRandomValues?.bind(fallbackCrypto);
+
+  if (!getRandomValues) {
+    throw new Error('Secure random generator is unavailable on this device.');
+  }
+
+  activeCrypto = {
+    ...fallbackCrypto,
+    getRandomValues,
+    subtle: fallbackCrypto.subtle
+  } as LibsignalWebCrypto;
+
+  setWebCrypto(activeCrypto);
+}
+
+installLibsignalWebCryptoFallback();
 
 type AuthSession = {
   user: {
@@ -73,6 +111,24 @@ type TextPayload = {
   createdAt: string;
 };
 
+type AttachmentPayload = {
+  kind: 'attachment';
+  attachmentId: string;
+  mediaKind: 'voice' | 'image' | 'video' | 'file';
+  fileName: string;
+  mimeType: string;
+  encryptedSize: number;
+  durationSeconds?: number;
+  encryption: {
+    algorithm: 'AES-256-GCM';
+    key: string;
+    iv: string;
+  };
+  senderUsername: string;
+  senderUserId: string;
+  createdAt: string;
+};
+
 type CallMediaKeyPayload = {
   kind: 'call_media_key';
   callId: string;
@@ -85,7 +141,7 @@ type CallMediaKeyPayload = {
   createdAt: string;
 };
 
-type PlaintextPayload = TextPayload | CallMediaKeyPayload;
+type PlaintextPayload = TextPayload | AttachmentPayload | CallMediaKeyPayload;
 
 type WireCiphertext = {
   type: number;
@@ -101,6 +157,23 @@ export type MobileSignalMessage = {
   text: string;
   createdAt: string;
   senderLabel: string;
+  status?: 'sent' | 'delivered' | 'seen' | 'received';
+};
+
+export type MobileSignalAttachmentMessage = {
+  id: string;
+  conversationKey: string;
+  direction: 'incoming' | 'outgoing';
+  kind: 'attachment';
+  mediaKind: 'voice' | 'image' | 'video' | 'file';
+  text: string;
+  localUri?: string;
+  fileName: string;
+  mimeType: string;
+  durationSeconds?: number;
+  createdAt: string;
+  senderLabel: string;
+  status?: 'sent' | 'delivered' | 'seen' | 'received' | 'failed';
 };
 
 export type MobileSignalCallMediaKey = {
@@ -117,7 +190,7 @@ export type MobileSignalCallMediaKey = {
   senderLabel: string;
 };
 
-export type MobileSignalEnvelope = MobileSignalMessage | MobileSignalCallMediaKey;
+export type MobileSignalEnvelope = MobileSignalMessage | MobileSignalAttachmentMessage | MobileSignalCallMediaKey;
 
 export type RelayCallEvent =
   | {
@@ -188,6 +261,12 @@ export type RelayCallEvent =
               usernameFragment?: string | null;
             };
           };
+    }
+  | {
+      type: 'message_seen';
+      conversationKey: string;
+      seenAt: string;
+      readerSessionId?: string;
     };
 
 type ClientRelayCommand = Record<string, unknown> & {
@@ -196,7 +275,7 @@ type ClientRelayCommand = Record<string, unknown> & {
 
 const PREKEY_COUNT = 40;
 const REQUEST_TIMEOUT_MS = 12000;
-const STORE_PREFIX = 'kryno_mobile_signal';
+const CHAT_QUEUE_TTL_HOURS = 24 * 365;
 
 function createUuid() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
@@ -204,17 +283,6 @@ function createUuid() {
     const value = char === 'x' ? random : (random & 0x3) | 0x8;
     return value.toString(16);
   });
-}
-
-function toBase64(buffer: ArrayBuffer) {
-  return Buffer.from(buffer).toString('base64');
-}
-
-function fromBase64(value: string) {
-  return Buffer.from(value, 'base64').buffer.slice(
-    Buffer.from(value, 'base64').byteOffset,
-    Buffer.from(value, 'base64').byteOffset + Buffer.from(value, 'base64').byteLength
-  );
 }
 
 export function createCallMediaEncryptionKey() {
@@ -235,6 +303,85 @@ function buildRelayUrl(origin: string) {
     return `${origin.replace(/^http:\/\//, 'ws://')}/api/messages/ws`;
   }
   return `${origin}/api/messages/ws`;
+}
+
+function getActiveCrypto() {
+  if (!activeCrypto) {
+    installLibsignalWebCryptoFallback();
+  }
+
+  if (!activeCrypto?.subtle) {
+    throw new Error('Secure media encryption is unavailable on this device.');
+  }
+
+  return activeCrypto;
+}
+
+function randomBytes(length: number) {
+  const bytes = new Uint8Array(length);
+  getActiveCrypto().getRandomValues(bytes);
+  return bytes;
+}
+
+function concatBytes(left: Uint8Array, right: Uint8Array) {
+  const merged = new Uint8Array(left.byteLength + right.byteLength);
+  merged.set(left, 0);
+  merged.set(right, left.byteLength);
+  return merged;
+}
+
+function exactArrayBuffer(bytes: Uint8Array) {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+function bytesToBase64(bytes: Uint8Array | ArrayBuffer) {
+  return Buffer.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).toString('base64');
+}
+
+function base64ToBytes(value: string) {
+  return new Uint8Array(Buffer.from(value, 'base64'));
+}
+
+function inferMediaKind(mimeType: string): AttachmentPayload['mediaKind'] {
+  if (mimeType.startsWith('audio/')) return 'voice';
+  if (mimeType.startsWith('image/')) return 'image';
+  if (mimeType.startsWith('video/')) return 'video';
+  return 'file';
+}
+
+function extensionForMimeType(mimeType: string) {
+  if (mimeType.includes('mp4')) return 'mp4';
+  if (mimeType.includes('mpeg')) return 'mp3';
+  if (mimeType.includes('m4a')) return 'm4a';
+  if (mimeType.includes('aac')) return 'aac';
+  if (mimeType.includes('png')) return 'png';
+  if (mimeType.includes('webp')) return 'webp';
+  if (mimeType.includes('gif')) return 'gif';
+  if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
+  return 'bin';
+}
+
+async function encryptAttachmentBytes(plainBytes: Uint8Array) {
+  const cryptoRuntime = getActiveCrypto();
+  const key = randomBytes(32);
+  const iv = randomBytes(12);
+  const importedKey = await cryptoRuntime.subtle.importKey('raw', exactArrayBuffer(key), { name: 'AES-GCM' }, false, ['encrypt']);
+  const ciphertext = await cryptoRuntime.subtle.encrypt({ name: 'AES-GCM', iv: exactArrayBuffer(iv) }, importedKey, exactArrayBuffer(plainBytes));
+
+  return {
+    encryptedBytes: new Uint8Array(ciphertext),
+    keyBase64: bytesToBase64(key),
+    ivBase64: bytesToBase64(iv)
+  };
+}
+
+async function decryptAttachmentBytes(encryptedBytes: ArrayBuffer, payload: AttachmentPayload) {
+  const cryptoRuntime = getActiveCrypto();
+  const key = base64ToBytes(payload.encryption.key);
+  const iv = base64ToBytes(payload.encryption.iv);
+  const importedKey = await cryptoRuntime.subtle.importKey('raw', exactArrayBuffer(key), { name: 'AES-GCM' }, false, ['decrypt']);
+  const plaintext = await cryptoRuntime.subtle.decrypt({ name: 'AES-GCM', iv: exactArrayBuffer(iv) }, importedKey, encryptedBytes);
+  return new Uint8Array(plaintext);
 }
 
 async function apiJson<T>(origin: string, accessToken: string, path: string, options: RequestInit = {}) {
@@ -269,22 +416,52 @@ async function apiJson<T>(origin: string, accessToken: string, path: string, opt
   }
 }
 
-function serializeKeyPair(keyPair: KeyPairType) {
-  return {
-    pubKey: toBase64(keyPair.pubKey),
-    privKey: toBase64(keyPair.privKey)
-  };
+async function apiBinary(origin: string, accessToken: string, path: string) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${buildApiBase(origin)}${path}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      },
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new Error(text || 'Encrypted attachment download failed.');
+    }
+
+    return response.arrayBuffer();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-function deserializeKeyPair(serialized?: { pubKey: string; privKey: string }): KeyPairType | undefined {
-  if (!serialized) {
-    return undefined;
+async function uploadEncryptedAttachment(
+  origin: string,
+  session: AuthSession,
+  input: {
+    recipientLookup: string;
+    recipientDeviceSessionId: string;
+    fileName: string;
+    mimeType: string;
+    encryptedBytes: Uint8Array;
   }
-
-  return {
-    pubKey: fromBase64(serialized.pubKey),
-    privKey: fromBase64(serialized.privKey)
-  };
+) {
+  return apiJson<{ attachmentId: string; expiresAt: string }>(origin, session.accessToken, '/attachments', {
+    method: 'POST',
+    body: JSON.stringify({
+      recipientLookup: input.recipientLookup,
+      recipientDeviceSessionId: input.recipientDeviceSessionId,
+      fileName: input.fileName,
+      mimeType: input.mimeType,
+      encryptedSize: input.encryptedBytes.byteLength,
+      ttlHours: CHAT_QUEUE_TTL_HOURS,
+      encryptedBytesBase64: bytesToBase64(input.encryptedBytes)
+    })
+  });
 }
 
 function serializeEncryptionResult(result: MessageType): WireCiphertext {
@@ -317,107 +494,8 @@ function getRecipientAddress(deviceSessionId: string) {
   return new SignalProtocolAddress(deviceSessionId, 1);
 }
 
-class AsyncStorageSignalStore implements StorageType {
-  private prefix: string;
-
-  constructor(namespace: string) {
-    this.prefix = `${STORE_PREFIX}:${namespace}`;
-  }
-
-  private key(suffix: string) {
-    return `${this.prefix}:${suffix}`;
-  }
-
-  async getIdentityKeyPair() {
-    const value = await AsyncStorage.getItem(this.key('identity'));
-    return deserializeKeyPair(value ? JSON.parse(value) : undefined);
-  }
-
-  async setIdentityKeyPair(value: KeyPairType) {
-    await AsyncStorage.setItem(this.key('identity'), JSON.stringify(serializeKeyPair(value)));
-  }
-
-  async getLocalRegistrationId() {
-    const value = await AsyncStorage.getItem(this.key('registrationId'));
-    return value ? Number(value) : undefined;
-  }
-
-  async setLocalRegistrationId(value: number) {
-    await AsyncStorage.setItem(this.key('registrationId'), String(value));
-  }
-
-  async isTrustedIdentity(identifier: string, identityKey: ArrayBuffer, _direction: Direction) {
-    const storedIdentity = await AsyncStorage.getItem(this.key(`identity:${identifier}`));
-    if (!storedIdentity) {
-      return true;
-    }
-
-    return storedIdentity === toBase64(identityKey);
-  }
-
-  async saveIdentity(encodedAddress: string, publicKey: ArrayBuffer) {
-    const key = this.key(`identity:${encodedAddress}`);
-    const existing = await AsyncStorage.getItem(key);
-    const next = toBase64(publicKey);
-    await AsyncStorage.setItem(key, next);
-    return existing !== next;
-  }
-
-  async loadPreKey(encodedAddress: string | number) {
-    const value = await AsyncStorage.getItem(this.key(`prekey:${encodedAddress}`));
-    return deserializeKeyPair(value ? JSON.parse(value) : undefined);
-  }
-
-  async storePreKey(keyId: number | string, keyPair: KeyPairType) {
-    await AsyncStorage.setItem(this.key(`prekey:${keyId}`), JSON.stringify(serializeKeyPair(keyPair)));
-  }
-
-  async removePreKey(keyId: number | string) {
-    await AsyncStorage.removeItem(this.key(`prekey:${keyId}`));
-  }
-
-  async storeSession(encodedAddress: string, record: SessionRecordType) {
-    await AsyncStorage.setItem(this.key(`session:${encodedAddress}`), JSON.stringify(record));
-  }
-
-  async loadSession(encodedAddress: string) {
-    const value = await AsyncStorage.getItem(this.key(`session:${encodedAddress}`));
-    return value ? (JSON.parse(value) as SessionRecordType) : undefined;
-  }
-
-  async loadSignedPreKey(keyId: number | string) {
-    const value = await AsyncStorage.getItem(this.key(`signed-prekey:${keyId}`));
-    return deserializeKeyPair(value ? JSON.parse(value) : undefined);
-  }
-
-  async storeSignedPreKey(keyId: number | string, keyPair: KeyPairType) {
-    await AsyncStorage.setItem(this.key(`signed-prekey:${keyId}`), JSON.stringify(serializeKeyPair(keyPair)));
-  }
-
-  async removeSignedPreKey(keyId: number | string) {
-    await AsyncStorage.removeItem(this.key(`signed-prekey:${keyId}`));
-  }
-
-  async getValue<T>(suffix: string) {
-    const value = await AsyncStorage.getItem(this.key(suffix));
-    return value ? (JSON.parse(value) as T) : undefined;
-  }
-
-  async setValue(suffix: string, value: unknown) {
-    await AsyncStorage.setItem(this.key(suffix), JSON.stringify(value));
-  }
-
-  async clearNamespaceState() {
-    const keys = await AsyncStorage.getAllKeys();
-    const matching = keys.filter((entry) => entry.startsWith(this.prefix));
-    if (matching.length > 0) {
-      await Promise.all(matching.map((entry) => AsyncStorage.removeItem(entry)));
-    }
-  }
-}
-
 function getStore(session: AuthSession, deviceProfile: DeviceProfile) {
-  return new AsyncStorageSignalStore(`${session.user.id}:${deviceProfile.deviceId}`);
+  return new SecureSignalStore(`${session.user.id}:${deviceProfile.deviceId}`);
 }
 
 async function ensureLocalBundle(origin: string, session: AuthSession, deviceProfile: DeviceProfile) {
@@ -533,6 +611,56 @@ async function processIncomingMessage(
     };
   }
 
+  if (payload.kind === 'attachment') {
+    try {
+      const encryptedBytes = await apiBinary(origin, session.accessToken, `/attachments/${encodeURIComponent(payload.attachmentId)}`);
+      const plainBytes = await decryptAttachmentBytes(encryptedBytes, payload);
+      const extension = extensionForMimeType(payload.mimeType);
+      const localUri = `${FileSystem.cacheDirectory ?? ''}kryno-${payload.attachmentId}.${extension}`;
+      await FileSystem.writeAsStringAsync(localUri, bytesToBase64(plainBytes), {
+        encoding: FileSystem.EncodingType.Base64
+      });
+
+      return {
+        id: message.messageId,
+        conversationKey: payload.senderUsername,
+        direction: 'incoming' as const,
+        kind: 'attachment' as const,
+        mediaKind: payload.mediaKind,
+        text:
+          payload.mediaKind === 'voice'
+            ? 'Voice message'
+            : payload.mediaKind === 'image'
+              ? 'Photo'
+              : payload.mediaKind === 'video'
+                ? 'Video'
+                : 'File',
+        localUri,
+        fileName: payload.fileName,
+        mimeType: payload.mimeType,
+        durationSeconds: payload.durationSeconds,
+        createdAt: payload.createdAt,
+        senderLabel: payload.senderUsername,
+        status: 'received' as const
+      };
+    } catch {
+      return {
+        id: message.messageId,
+        conversationKey: payload.senderUsername,
+        direction: 'incoming' as const,
+        kind: 'attachment' as const,
+        mediaKind: payload.mediaKind,
+        text: 'Encrypted attachment could not be opened',
+        fileName: payload.fileName,
+        mimeType: payload.mimeType,
+        durationSeconds: payload.durationSeconds,
+        createdAt: payload.createdAt,
+        senderLabel: payload.senderUsername,
+        status: 'failed' as const
+      };
+    }
+  }
+
   if (payload.kind === 'call_media_key') {
     return {
       id: message.messageId,
@@ -579,7 +707,7 @@ export async function sendMobileDirectText(
   const encrypted = await cipher.encrypt(plaintext);
   const messageId = createUuid();
 
-  await apiJson(origin, session.accessToken, '/messages/send', {
+  const result = await apiJson<{ deliveryMode?: 'live' | 'queued' }>(origin, session.accessToken, '/messages/send', {
     method: 'POST',
     body: JSON.stringify({
       messageId,
@@ -589,9 +717,11 @@ export async function sendMobileDirectText(
       ciphertext: JSON.stringify(serializeEncryptionResult(encrypted)),
       encryptedContentType: 'signal',
       clientCreatedAt: createdAt,
-      ttlHours: 24
+      ttlHours: CHAT_QUEUE_TTL_HOURS
     })
   });
+
+  const status: MobileSignalMessage['status'] = result.deliveryMode === 'live' ? 'delivered' : 'sent';
 
   return {
     id: messageId,
@@ -600,7 +730,97 @@ export async function sendMobileDirectText(
     kind: 'text' as const,
     text,
     createdAt,
-    senderLabel: session.user.username
+    senderLabel: session.user.username,
+    status
+  };
+}
+
+export async function sendMobileDirectAttachment(
+  origin: string,
+  session: AuthSession,
+  deviceProfile: DeviceProfile,
+  recipientLookup: string,
+  input: {
+    uri: string;
+    fileName: string;
+    mimeType: string;
+    mediaKind?: 'voice' | 'image' | 'video' | 'file';
+    durationSeconds?: number;
+  }
+) {
+  const { recipientDeviceSessionId, address } = await ensureRecipientSession(origin, session, deviceProfile, recipientLookup);
+  const store = getStore(session, deviceProfile);
+  const cipher = new SessionCipher(store, address);
+  const createdAt = new Date().toISOString();
+  const fileBase64 = await FileSystem.readAsStringAsync(input.uri, { encoding: FileSystem.EncodingType.Base64 });
+  const plainBytes = base64ToBytes(fileBase64);
+  const encrypted = await encryptAttachmentBytes(plainBytes);
+  const upload = await uploadEncryptedAttachment(origin, session, {
+    recipientLookup,
+    recipientDeviceSessionId,
+    fileName: input.fileName,
+    mimeType: input.mimeType,
+    encryptedBytes: encrypted.encryptedBytes
+  });
+  const mediaKind = input.mediaKind ?? inferMediaKind(input.mimeType);
+  const payload: AttachmentPayload = {
+    kind: 'attachment',
+    attachmentId: upload.attachmentId,
+    mediaKind,
+    fileName: input.fileName,
+    mimeType: input.mimeType,
+    encryptedSize: encrypted.encryptedBytes.byteLength,
+    durationSeconds: input.durationSeconds,
+    encryption: {
+      algorithm: 'AES-256-GCM',
+      key: encrypted.keyBase64,
+      iv: encrypted.ivBase64
+    },
+    senderUsername: session.user.username,
+    senderUserId: session.user.id,
+    createdAt
+  };
+
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload)).buffer;
+  const signalCiphertext = await cipher.encrypt(plaintext);
+  const messageId = createUuid();
+
+  const result = await apiJson<{ deliveryMode?: 'live' | 'queued' }>(origin, session.accessToken, '/messages/send', {
+    method: 'POST',
+    body: JSON.stringify({
+      messageId,
+      recipientLookup,
+      recipientDeviceSessionId,
+      messageType: 'attachment',
+      ciphertext: JSON.stringify(serializeEncryptionResult(signalCiphertext)),
+      encryptedContentType: 'signal',
+      clientCreatedAt: createdAt,
+      ttlHours: CHAT_QUEUE_TTL_HOURS
+    })
+  });
+
+  const status: MobileSignalAttachmentMessage['status'] = result.deliveryMode === 'live' ? 'delivered' : 'sent';
+  return {
+    id: messageId,
+    conversationKey: recipientLookup,
+    direction: 'outgoing' as const,
+    kind: 'attachment' as const,
+    mediaKind,
+    text:
+      mediaKind === 'voice'
+        ? 'Voice message'
+        : mediaKind === 'image'
+          ? 'Photo'
+          : mediaKind === 'video'
+            ? 'Video'
+            : 'File',
+    localUri: input.uri,
+    fileName: input.fileName,
+    mimeType: input.mimeType,
+    durationSeconds: input.durationSeconds,
+    createdAt,
+    senderLabel: session.user.username,
+    status
   };
 }
 
