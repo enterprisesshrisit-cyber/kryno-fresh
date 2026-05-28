@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { authenticateAccessToken } from '../plugins/auth.js';
+import { pool } from '../db/pool.js';
 import { callsService, type ClientRelayCommand } from '../services/calls.service.js';
 import { relayService } from '../services/relay.service.js';
 
@@ -11,6 +12,37 @@ export type RelayAuthMessage = {
 type RelayHeartbeatMessage = {
   type: 'ping';
 };
+
+type MessageSeenCommand = {
+  type: 'message_seen';
+  recipientLookup: string;
+  seenAt?: string;
+};
+
+async function forwardMessageSeen(auth: { userId: string; sessionId: string }, command: MessageSeenCommand) {
+  const result = await pool.query<{ target_user_id: string; sender_username: string }>(
+    `
+      select target.id as target_user_id, sender.username as sender_username
+      from users sender
+      join users target on target.id::text = $2 or lower(target.username) = lower($2)
+      where sender.id = $1
+      limit 1
+    `,
+    [auth.userId, command.recipientLookup.trim()]
+  );
+
+  const row = result.rows[0];
+  if (!row || row.target_user_id === auth.userId) {
+    return;
+  }
+
+  relayService.sendEventToUser(row.target_user_id, {
+    type: 'message_seen',
+    conversationKey: row.sender_username,
+    seenAt: command.seenAt ?? new Date().toISOString(),
+    readerSessionId: auth.sessionId
+  });
+}
 
 export function isRelayAuthMessage(value: unknown): value is RelayAuthMessage {
   if (!value || typeof value !== 'object') {
@@ -79,8 +111,8 @@ export async function relayRoutes(app: FastifyInstance) {
           auth = await authenticateAccessToken(payload.accessToken);
           authenticated = true;
           clearTimeout(authTimeout);
-          callsService.handleSessionReconnect(auth.sessionId);
           relayService.registerConnection(auth, socket);
+          await callsService.handleSessionReconnect(auth);
           socket.send(
             JSON.stringify({
               type: 'relay_ready',
@@ -91,7 +123,7 @@ export async function relayRoutes(app: FastifyInstance) {
           return;
         }
 
-        const command = payload as ClientRelayCommand;
+        const command = payload as ClientRelayCommand | MessageSeenCommand;
         if (!auth) {
           socket.send(
             JSON.stringify({
@@ -110,7 +142,14 @@ export async function relayRoutes(app: FastifyInstance) {
           );
           return;
         }
-        await callsService.handleCommand(auth, command);
+        if ((payload as unknown as MessageSeenCommand).type === 'message_seen') {
+          const seenCommand = payload as unknown as MessageSeenCommand;
+          if (typeof seenCommand.recipientLookup === 'string' && seenCommand.recipientLookup.trim().length >= 3) {
+            await forwardMessageSeen(auth, seenCommand);
+          }
+          return;
+        }
+        await callsService.handleCommand(auth, command as ClientRelayCommand);
       } catch (error) {
         socket.send(
           JSON.stringify({
