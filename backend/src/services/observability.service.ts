@@ -15,7 +15,10 @@ const SENSITIVE_KEYS = [
   'encryptedBytesBase64',
   'bytesBase64',
   'ciphertext',
-  'token'
+  'token',
+  'pushToken',
+  'push_token',
+  'pushTokenUpdatedAt'
 ];
 
 function scrubSensitiveData(value: unknown): unknown {
