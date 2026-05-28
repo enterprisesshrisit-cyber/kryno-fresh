@@ -3,9 +3,10 @@ import { AccessToken } from 'livekit-server-sdk';
 import { pool } from '../db/pool.js';
 import { env } from '../config/env.js';
 import { AppError } from '../utils/errors.js';
+import { pushService } from './push.service.js';
 import { relayService } from './relay.service.js';
 
-const CALL_RING_TIMEOUT_MS = 35_000;
+const CALL_RING_TIMEOUT_MS = 60_000;
 const CALL_RECONNECT_GRACE_MS = 75_000;
 const LIVEKIT_TOKEN_TTL_SECONDS = 15 * 60;
 
@@ -278,7 +279,7 @@ export class CallsService {
       recipientUserId: recipient?.id ?? null,
       recipientUsername: recipient?.username ?? null,
       expiresInSeconds: LIVEKIT_TOKEN_TTL_SECONDS,
-      e2eeRequired: true
+      e2eeRequired: false
     };
   }
 
@@ -299,8 +300,35 @@ export class CallsService {
     }
   }
 
-  handleSessionReconnect(sessionId: string) {
-    this.clearDisconnectTimer(sessionId);
+  async handleSessionReconnect(auth: RelayAuthContext) {
+    this.clearDisconnectTimer(auth.sessionId);
+
+    for (const call of this.callsById.values()) {
+      if (
+        call.recipientUserId !== auth.userId ||
+        call.acceptedSessionId ||
+        call.state !== 'ringing' ||
+        call.invitedSessionIds.has(auth.sessionId) ||
+        this.sessionIsBusy(auth.sessionId)
+      ) {
+        continue;
+      }
+
+      call.invitedSessionIds.add(auth.sessionId);
+      this.attachSession(call.callId, auth.sessionId);
+
+      const callerUsername = await this.resolveUsername(call.callerUserId);
+      relayService.sendEventToSession(auth.sessionId, {
+        type: 'call_invite',
+        callId: call.callId,
+        mode: call.mode,
+        callerSessionId: call.callerSessionId,
+        callerUserId: call.callerUserId,
+        callerUsername,
+        mediaProvider: call.mediaProvider,
+        roomName: call.roomName
+      });
+    }
   }
 
   private async startCall(auth: RelayAuthContext, command: CallInviteCommand) {
@@ -336,15 +364,14 @@ export class CallsService {
       return;
     }
 
-    const invitedSessionIds = relayService
-      .listUserSessionIds(recipient.id)
-      .filter((sessionId) => !this.sessionIsBusy(sessionId));
+    const connectedSessionIds = relayService.listUserSessionIds(recipient.id);
+    const invitedSessionIds = connectedSessionIds.filter((sessionId) => !this.sessionIsBusy(sessionId));
 
-    if (invitedSessionIds.length === 0) {
+    if (connectedSessionIds.length > 0 && invitedSessionIds.length === 0) {
       relayService.sendEventToSession(auth.sessionId, {
         type: 'call_unavailable',
         callId: command.callId,
-        reason: 'Recipient is offline or already busy.'
+        reason: 'Recipient is already in another call.'
       });
       return;
     }
@@ -376,6 +403,13 @@ export class CallsService {
     this.callsById.set(call.callId, call);
     this.attachSession(call.callId, auth.sessionId);
 
+    const pushResult = await pushService.sendCallInviteNotification({
+      recipientUserId: recipient.id,
+      callerUsername,
+      callId: call.callId,
+      mode: call.mode
+    });
+
     for (const sessionId of invitedSessionIds) {
       this.attachSession(call.callId, sessionId);
       relayService.sendEventToSession(sessionId, {
@@ -397,7 +431,9 @@ export class CallsService {
       recipientUsername: recipient.username,
       mode: call.mode,
       mediaProvider: call.mediaProvider,
-      roomName: call.roomName
+      roomName: call.roomName,
+      pushNotification: pushResult,
+      waitingForAppOpen: invitedSessionIds.length === 0
     });
   }
 
