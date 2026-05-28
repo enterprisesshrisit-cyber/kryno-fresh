@@ -5,7 +5,8 @@ import { AppError } from '../utils/errors.js';
 import { canAccessDirectAttachment } from '../utils/access-control.js';
 import { attachmentStorage } from './object-storage.service.js';
 
-const MAX_TTL_HOURS = 24;
+const DEFAULT_ATTACHMENT_TTL_HOURS = 24 * 365;
+const MAX_TTL_HOURS = 24 * 365;
 
 type UploadAttachmentInput = {
   senderUserId: string;
@@ -65,7 +66,7 @@ export class AttachmentsService {
       }
 
       const attachmentId = randomUUID();
-      const ttlHours = Math.min(Math.max(input.ttlHours ?? MAX_TTL_HOURS, 1), MAX_TTL_HOURS);
+      const ttlHours = Math.min(Math.max(input.ttlHours ?? DEFAULT_ATTACHMENT_TTL_HOURS, 1), MAX_TTL_HOURS);
       const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
       const storageKey = `${attachmentId}.bin`;
       await attachmentStorage.putObject({
