@@ -1,17 +1,29 @@
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { messagesService } from '../services/messages.service.js';
+import { isSignalCiphertextEnvelope } from '../utils/signal-message.js';
 
-const sendMessageSchema = z.object({
-  messageId: z.uuid(),
-  recipientLookup: z.string().min(3).max(128),
-  recipientDeviceSessionId: z.uuid().optional(),
-  messageType: z.string().min(1).max(32),
-  ciphertext: z.string().min(16),
-  encryptedContentType: z.string().min(1).max(32).default('signal'),
-  clientCreatedAt: z.iso.datetime(),
-  ttlHours: z.number().int().positive().max(24).optional()
-});
+export const sendMessageSchema = z
+  .object({
+    messageId: z.uuid(),
+    recipientLookup: z.string().min(3).max(128),
+    recipientDeviceSessionId: z.uuid().optional(),
+    messageType: z.string().min(1).max(32),
+    ciphertext: z.string().min(16),
+    encryptedContentType: z.string().min(1).max(32).default('signal'),
+    clientCreatedAt: z.iso.datetime(),
+    ttlHours: z.number().int().positive().max(24 * 365).optional()
+  })
+  .strict()
+  .superRefine((body, ctx) => {
+    if (body.encryptedContentType === 'signal' && !isSignalCiphertextEnvelope(body.ciphertext)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ciphertext'],
+        message: 'Signal messages must contain a valid encrypted ciphertext envelope.'
+      });
+    }
+  });
 
 const fetchInboxQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(200).optional()
