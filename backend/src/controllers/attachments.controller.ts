@@ -11,7 +11,7 @@ const uploadFieldsSchema = z.object({
   fileName: z.string().min(1).max(255),
   mimeType: z.string().min(1).max(160),
   encryptedSize: z.coerce.number().int().positive(),
-  ttlHours: z.coerce.number().int().positive().max(24).optional()
+  ttlHours: z.coerce.number().int().positive().max(24 * 365).optional()
 });
 
 const uploadJsonSchema = uploadFieldsSchema.extend({
