@@ -51,6 +51,28 @@ export class RelayService {
     }
   }
 
+  sendEventToUser(userId: string, payload: unknown) {
+    const sessionIds = this.sessionsByUser.get(userId);
+    if (!sessionIds) {
+      return {
+        delivered: false,
+        deliveredCount: 0
+      };
+    }
+
+    let deliveredCount = 0;
+    for (const sessionId of sessionIds) {
+      if (this.sendEventToSession(sessionId, payload)) {
+        deliveredCount += 1;
+      }
+    }
+
+    return {
+      delivered: deliveredCount > 0,
+      deliveredCount
+    };
+  }
+
   registerConnection(auth: RelayAuthContext, socket: RelaySocket) {
     this.unregisterConnection(auth.sessionId);
 
