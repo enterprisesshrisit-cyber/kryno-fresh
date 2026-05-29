@@ -186,7 +186,7 @@ export async function buildApp() {
   await app.register(async (instance) => {
     await instance.register(rateLimit, {
       ...rateLimitStoreOptions,
-      max: 120,
+      max: 600,
       timeWindow: '1 minute'
     });
     await instance.register(callsRoutes, { prefix: '/api/calls' });
@@ -195,7 +195,7 @@ export async function buildApp() {
   await app.register(async (instance) => {
     await instance.register(rateLimit, {
       ...rateLimitStoreOptions,
-      max: 600,
+      max: 3000,
       timeWindow: '1 minute'
     });
     await instance.register(messagesRoutes, { prefix: '/api/messages' });
@@ -215,7 +215,7 @@ export async function buildApp() {
   await app.register(async (instance) => {
     await instance.register(rateLimit, {
       ...rateLimitStoreOptions,
-      max: 240,
+      max: 1000,
       timeWindow: '1 minute'
     });
     await instance.register(attachmentsRoutes, { prefix: '/api/attachments' });
