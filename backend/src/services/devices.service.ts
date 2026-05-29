@@ -6,7 +6,7 @@ type RegisterPushTokenInput = {
   userId: string;
   sessionId: string;
   deviceId: string;
-  provider: 'expo';
+  provider: 'expo' | 'fcm';
   pushToken: string;
   platform: 'android' | 'ios' | 'web';
 };
