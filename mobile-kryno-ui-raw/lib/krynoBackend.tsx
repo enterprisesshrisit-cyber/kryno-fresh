@@ -408,6 +408,7 @@ const BUILD_LOCKED_BACKEND_ORIGIN = !__DEV__ && DEFAULT_BACKEND_ORIGIN.trim()
   ? DEFAULT_BACKEND_ORIGIN.trim().replace(/\/+$/, '')
   : '';
 const STABLE_STARTUP_MODE = process.env.EXPO_PUBLIC_KRYNO_STABLE_STARTUP === 'true';
+const ACCESS_TOKEN_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
 const TIER_SEQUENCE = ['Basic', 'Inner Circle', 'Elite'] as const;
 const MOOD_SEQUENCE = ['chill', 'social', 'focus'] as const;
@@ -804,6 +805,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const peerConnectionCallIdRef = useRef<string | null>(null);
   const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const pendingCallMediaKeysRef = useRef<Map<string, MobileSignalCallMediaKey>>(new Map());
+  const lastAuthRefreshAtRef = useRef(0);
 
   const loadMobileCallRuntime = useCallback(async () => {
     if (!mobileCallRuntimeRef.current) {
@@ -889,6 +891,46 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     },
     [backendOrigin, deviceProfile, refreshAuthSession]
   );
+
+  useEffect(() => {
+    if (!initialized || !session?.user.id || !deviceProfile) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const refreshIfNeeded = async (reason: string) => {
+      if (cancelled) {
+        return;
+      }
+
+      const elapsed = Date.now() - lastAuthRefreshAtRef.current;
+      if (elapsed > 0 && elapsed < 60_000) {
+        return;
+      }
+
+      try {
+        lastAuthRefreshAtRef.current = Date.now();
+        await refreshAuthSession();
+        console.log('[KrynoStartup] auth session refreshed', reason);
+      } catch (refreshError) {
+        console.warn(
+          '[KrynoStartup] auth session refresh failed',
+          refreshError instanceof Error ? refreshError.message : 'unknown'
+        );
+      }
+    };
+
+    void refreshIfNeeded('startup');
+    const intervalId = setInterval(() => {
+      void refreshIfNeeded('interval');
+    }, ACCESS_TOKEN_REFRESH_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [deviceProfile, initialized, refreshAuthSession, session?.user.id]);
 
   const upsertKnownUsers = useCallback((entries: KnownChatUser[]) => {
     if (entries.length === 0) {
@@ -1631,6 +1673,16 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
               return;
             }
 
+            if (status === 'error' && detail && isAccessTokenExpiredError(detail)) {
+              void refreshAuthSession().catch((refreshError) => {
+                console.warn(
+                  '[KrynoStartup] relay token refresh failed',
+                  refreshError instanceof Error ? refreshError.message : 'unknown'
+                );
+              });
+              return;
+            }
+
             if (status === 'error' && detail) {
               setError(detail);
             }
@@ -1650,7 +1702,16 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       relayHandleRef.current?.disconnect();
       relayHandleRef.current = null;
     };
-  }, [applyCallMediaKey, backendOrigin, deviceProfile, ingestSignalMessages, initialized, session, showInAppMessageNotice]);
+  }, [
+    applyCallMediaKey,
+    backendOrigin,
+    deviceProfile,
+    ingestSignalMessages,
+    initialized,
+    refreshAuthSession,
+    session,
+    showInAppMessageNotice
+  ]);
 
   useEffect(() => {
     if (!initialized || !session || !deviceProfile) {
