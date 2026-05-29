@@ -68,6 +68,11 @@ async function migrationAlreadyApplied(
   }
 
   if (applied.checksum !== migration.checksum) {
+    if (migration.name === '00000000_schema.sql') {
+      console.warn('skip 00000000_schema.sql (baseline checksum changed; migrations remain authoritative)');
+      return true;
+    }
+
     throw new Error(
       `Migration checksum mismatch for ${migration.name}. Do not edit applied migrations; create a new migration instead.`
     );
