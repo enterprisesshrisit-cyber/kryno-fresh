@@ -4,8 +4,8 @@ import { devicesService } from '../services/devices.service.js';
 
 const pushTokenSchema = z
   .object({
-    provider: z.literal('expo'),
-    pushToken: z.string().min(20).max(512),
+    provider: z.enum(['expo', 'fcm']),
+    pushToken: z.string().min(20).max(4096),
     platform: z.enum(['android', 'ios', 'web']),
     deviceId: z.string().min(3).max(128)
   })
