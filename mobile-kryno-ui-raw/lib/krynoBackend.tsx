@@ -250,6 +250,7 @@ type MobileSignalEnvelope = MobileSignalMessage | MobileSignalCallMediaKey;
 
 type RelayHandle = {
   send: (command: Record<string, unknown> & { type: string }) => boolean;
+  waitUntilConnected?: (timeoutMs?: number) => Promise<boolean>;
   disconnect: () => void;
 };
 
@@ -865,7 +866,8 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           Object.prototype.toString.call(body) === '[object FormData]' ||
           (typeof body === 'object' && body !== null && Object.prototype.hasOwnProperty.call(body, '_parts')));
 
-      if (!isFormDataBody) {
+      const hasRequestBody = body !== undefined && body !== null;
+      if (hasRequestBody && !isFormDataBody && !headers.has('Content-Type')) {
         headers.set('Content-Type', 'application/json');
       }
 
@@ -2268,6 +2270,11 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
       if (!sessionRef.current || !deviceProfile || !relayHandleRef.current) {
         throw new Error('Secure relay is not connected yet.');
+      }
+
+      const relayReady = await relayHandleRef.current.waitUntilConnected?.(6500);
+      if (relayReady === false) {
+        throw new Error('Secure relay is reconnecting. Please try again in a moment.');
       }
 
       const callId = createUuid();
