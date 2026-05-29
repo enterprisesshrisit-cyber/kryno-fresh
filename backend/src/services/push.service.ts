@@ -29,6 +29,7 @@ type ExpoPushPayload = {
 };
 
 const EXPO_PUSH_ENDPOINT = 'https://exp.host/--/api/v2/push/send';
+const UNDEFINED_COLUMN_CODE = '42703';
 
 function isExpoPushToken(value: string) {
   return /^ExponentPushToken\[[^\]]+\]$/.test(value) || /^ExpoPushToken\[[^\]]+\]$/.test(value);
@@ -74,20 +75,33 @@ export class PushService {
     payload: ExpoPushPayload;
   }) {
     const excluded = input.excludeSessionIds ?? [];
-    const result = await pool.query<PushTarget>(
-      `
-        select id as session_id, push_provider, push_token, push_platform
-        from device_sessions
-        where user_id = $1
-          and trusted = true
-          and push_token is not null
-          and push_provider = 'expo'
-          and not (id = any($2::uuid[]))
-        order by push_token_updated_at desc nulls last
-        limit 10
-      `,
-      [input.recipientUserId, excluded]
-    );
+    let result;
+    try {
+      result = await pool.query<PushTarget>(
+        `
+          select id as session_id, push_provider, push_token, push_platform
+          from device_sessions
+          where user_id = $1
+            and trusted = true
+            and push_token is not null
+            and push_provider = 'expo'
+            and not (id = any($2::uuid[]))
+          order by push_token_updated_at desc nulls last
+          limit 10
+        `,
+        [input.recipientUserId, excluded]
+      );
+    } catch (error) {
+      if ((error as { code?: string }).code === UNDEFINED_COLUMN_CODE) {
+        captureException(error, {
+          surface: 'PushService',
+          reason: 'device_push_schema_missing'
+        });
+        return { attempted: 0, sent: 0, disabled: true };
+      }
+
+      throw error;
+    }
 
     const targets = result.rows.filter((target) => isExpoPushToken(target.push_token));
     if (targets.length === 0) {
