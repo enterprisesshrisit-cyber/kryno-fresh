@@ -6,7 +6,7 @@ const MESSAGE_CHANNEL_ID = 'kryno-messages';
 const CALL_CHANNEL_ID = 'kryno-calls';
 
 type RegisteredPushToken = {
-  provider: 'expo';
+  provider: 'expo' | 'fcm';
   token: string;
   platform: 'android' | 'ios' | 'web';
 };
@@ -63,7 +63,7 @@ export async function configureKrynoNotifications() {
   configured = true;
 }
 
-export async function registerKrynoPushToken(): Promise<RegisteredPushToken | null> {
+export async function registerKrynoPushToken(): Promise<RegisteredPushToken[]> {
   await configureKrynoNotifications();
 
   const current = await Notifications.getPermissionsAsync();
@@ -74,13 +74,35 @@ export async function registerKrynoPushToken(): Promise<RegisteredPushToken | nu
 
   if (finalStatus !== 'granted') {
     console.log('[KrynoNotifications] permission not granted');
-    return null;
+    return [];
+  }
+
+  const platform = Platform.OS === 'ios' || Platform.OS === 'android' ? Platform.OS : 'web';
+
+  if (Platform.OS === 'android') {
+    try {
+      const deviceToken = await Notifications.getDevicePushTokenAsync();
+      const token = typeof deviceToken.data === 'string' ? deviceToken.data : JSON.stringify(deviceToken.data);
+      if (token) {
+        console.log('[KrynoNotifications] native Android FCM token registered');
+        return [
+          {
+            provider: 'fcm',
+            token,
+            platform
+          }
+        ];
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'native push token unavailable';
+      console.warn('[KrynoNotifications] native push token unavailable; trying Expo fallback', message);
+    }
   }
 
   const projectId = getExpoProjectId();
   if (!projectId) {
     console.warn('[KrynoNotifications] Expo project id missing; push token skipped');
-    return null;
+    return [];
   }
 
   let token: Notifications.ExpoPushToken;
@@ -89,17 +111,18 @@ export async function registerKrynoPushToken(): Promise<RegisteredPushToken | nu
   } catch (error) {
     const message = error instanceof Error ? error.message : 'push token unavailable';
     console.warn('[KrynoNotifications] remote push token unavailable; local notifications remain enabled', message);
-    return null;
+    return [];
   }
 
-  console.log('[KrynoNotifications] push token registered');
-  const platform = Platform.OS === 'ios' || Platform.OS === 'android' ? Platform.OS : 'web';
+  console.log('[KrynoNotifications] Expo push token registered');
 
-  return {
-    provider: 'expo',
-    token: token.data,
-    platform
-  };
+  return [
+    {
+      provider: 'expo',
+      token: token.data,
+      platform
+    }
+  ];
 }
 
 export async function showForegroundMessageNotification(input: { senderLabel?: string }) {
