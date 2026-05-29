@@ -450,7 +450,7 @@ async function uploadEncryptedAttachment(
     encryptedBytes: Uint8Array;
   }
 ) {
-  return apiJson<{ attachmentId: string; expiresAt: string }>(origin, session.accessToken, '/attachments', {
+  return apiJson<{ attachmentId: string; expiresAt: string }>(origin, session.accessToken, '/attachments/upload', {
     method: 'POST',
     body: JSON.stringify({
       recipientLookup: input.recipientLookup,
