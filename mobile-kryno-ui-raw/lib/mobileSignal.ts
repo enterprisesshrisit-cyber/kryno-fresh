@@ -969,12 +969,26 @@ export function connectMobileDirectRelay(
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let open = false;
   let authenticated = false;
+  const connectionWaiters = new Set<{
+    resolve: (value: boolean) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
 
   const clearHeartbeat = () => {
     if (heartbeatTimer !== null) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
     }
+  };
+
+  const isConnected = () => Boolean(socket && open && authenticated && socket.readyState === WebSocket.OPEN);
+
+  const resolveConnectionWaiters = (value: boolean) => {
+    for (const waiter of connectionWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(value);
+    }
+    connectionWaiters.clear();
   };
 
   const openSocket = async () => {
@@ -1015,6 +1029,7 @@ export function connectMobileDirectRelay(
 
         if (payload.type === 'relay_ready') {
           authenticated = true;
+          resolveConnectionWaiters(true);
           handlers.onStatus?.('connected');
           return;
         }
@@ -1069,15 +1084,33 @@ export function connectMobileDirectRelay(
 
   return {
     send(command: ClientRelayCommand) {
-      if (!socket || !open || !authenticated || socket.readyState !== WebSocket.OPEN) {
+      const activeSocket = socket;
+      if (!activeSocket || !isConnected()) {
         return false;
       }
 
-      socket.send(JSON.stringify(command));
+      activeSocket.send(JSON.stringify(command));
       return true;
+    },
+    waitUntilConnected(timeoutMs = 6500) {
+      if (isConnected()) {
+        return Promise.resolve(true);
+      }
+
+      return new Promise<boolean>((resolve) => {
+        const waiter = {
+          resolve,
+          timer: setTimeout(() => {
+            connectionWaiters.delete(waiter);
+            resolve(false);
+          }, timeoutMs)
+        };
+        connectionWaiters.add(waiter);
+      });
     },
     disconnect() {
       disposed = true;
+      resolveConnectionWaiters(false);
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
       }
