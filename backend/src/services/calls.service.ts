@@ -3,6 +3,7 @@ import { AccessToken } from 'livekit-server-sdk';
 import { pool } from '../db/pool.js';
 import { env } from '../config/env.js';
 import { AppError } from '../utils/errors.js';
+import { captureException } from './observability.service.js';
 import { pushService } from './push.service.js';
 import { relayService } from './relay.service.js';
 
@@ -86,6 +87,23 @@ type ActiveCall = {
   state: 'ringing' | 'connecting' | 'connected';
   timeout: NodeJS.Timeout;
 };
+
+async function trySendCallPush(input: {
+  recipientUserId: string;
+  callerUsername: string;
+  callId: string;
+  mode: 'audio' | 'video';
+}) {
+  try {
+    return await pushService.sendCallInviteNotification(input);
+  } catch (error) {
+    captureException(error, {
+      surface: 'CallsService',
+      reason: 'call_push_notification_failed'
+    });
+    return { attempted: 0, sent: 0, failed: true };
+  }
+}
 
 function normalizeReason(reason?: string) {
   return reason?.trim() || 'ended';
@@ -403,7 +421,7 @@ export class CallsService {
     this.callsById.set(call.callId, call);
     this.attachSession(call.callId, auth.sessionId);
 
-    const pushResult = await pushService.sendCallInviteNotification({
+    const pushResult = await trySendCallPush({
       recipientUserId: recipient.id,
       callerUsername,
       callId: call.callId,
