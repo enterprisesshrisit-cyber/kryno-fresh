@@ -1,10 +1,26 @@
 import { pool, withTransaction } from '../db/pool.js';
 import { AppError } from '../utils/errors.js';
+import { captureException } from './observability.service.js';
 import { pushService } from './push.service.js';
 import { relayService } from './relay.service.js';
 
 const DEFAULT_QUEUE_TTL_HOURS = 24 * 365;
 const MAX_TTL_HOURS = 24 * 365;
+
+async function trySendMessagePush(recipientUserId: string, excludeSessionIds?: string[]) {
+  try {
+    return await pushService.sendDirectMessageNotification({
+      recipientUserId,
+      excludeSessionIds
+    });
+  } catch (error) {
+    captureException(error, {
+      surface: 'MessagesService',
+      reason: 'push_notification_failed'
+    });
+    return { attempted: 0, sent: 0, failed: true };
+  }
+}
 
 type SendMessageInput = {
   messageId: string;
@@ -90,9 +106,7 @@ export class MessagesService {
       });
 
       if (relayResult.delivered) {
-        const pushResult = await pushService.sendDirectMessageNotification({
-          recipientUserId: recipient.id
-        });
+        const pushResult = await trySendMessagePush(recipient.id, relayResult.deliveredSessionIds);
 
         return {
           messageId: input.messageId,
@@ -154,9 +168,7 @@ export class MessagesService {
       );
 
       const row = inserted.rows[0];
-      const pushResult = await pushService.sendDirectMessageNotification({
-        recipientUserId: row.recipient_user_id
-      });
+      const pushResult = await trySendMessagePush(row.recipient_user_id);
 
       return {
         messageId: row.message_id,
