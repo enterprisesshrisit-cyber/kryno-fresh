@@ -18,6 +18,10 @@ create table if not exists device_sessions (
   device_id varchar(128) not null,
   device_name varchar(120),
   device_public_key text not null,
+  push_provider varchar(24),
+  push_token text,
+  push_platform varchar(16),
+  push_token_updated_at timestamptz,
   trusted boolean not null default true,
   last_seen_at timestamptz not null default now(),
   last_seen_ip inet,
@@ -44,6 +48,8 @@ create table if not exists refresh_tokens (
 
 create index if not exists refresh_tokens_user_device_idx on refresh_tokens(user_id, device_session_id);
 create index if not exists refresh_tokens_family_idx on refresh_tokens(token_family_id);
+create index if not exists device_sessions_push_token_idx on device_sessions(user_id, push_provider, push_token_updated_at desc)
+  where push_token is not null and trusted = true;
 
 create table if not exists email_verification_tokens (
   id uuid primary key default gen_random_uuid(),
