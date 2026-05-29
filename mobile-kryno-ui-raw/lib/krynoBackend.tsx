@@ -806,6 +806,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const pendingCallMediaKeysRef = useRef<Map<string, MobileSignalCallMediaKey>>(new Map());
   const lastAuthRefreshAtRef = useRef(0);
+  const authRefreshPromiseRef = useRef<Promise<AuthSession> | null>(null);
 
   const loadMobileCallRuntime = useCallback(async () => {
     if (!mobileCallRuntimeRef.current) {
@@ -826,6 +827,10 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   }, [currentCall]);
 
   const refreshAuthSession = useCallback(async () => {
+    if (authRefreshPromiseRef.current) {
+      return authRefreshPromiseRef.current;
+    }
+
     const apiOrigin = requireBackendOrigin(backendOrigin);
     const activeSession = sessionRef.current;
 
@@ -833,26 +838,39 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       throw new Error('Please sign in again to continue.');
     }
 
-    const refreshResponse = await fetchWithTimeout(`${apiOrigin}/api/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        refresh_token: activeSession.refreshToken,
-        device_id: deviceProfile.deviceId
-      })
-    });
+    const refreshPromise = (async () => {
+      const refreshResponse = await fetchWithTimeout(`${apiOrigin}/api/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          refresh_token: activeSession.refreshToken,
+          device_id: deviceProfile.deviceId
+        })
+      });
 
-    const refreshed = await parseJsonResponse<{ accessToken: string; refreshToken: string }>(refreshResponse);
-    const nextSession = {
-      ...activeSession,
-      accessToken: refreshed.accessToken,
-      refreshToken: refreshed.refreshToken
-    };
+      const refreshed = await parseJsonResponse<{ accessToken: string; refreshToken: string }>(refreshResponse);
+      const nextSession = {
+        ...activeSession,
+        accessToken: refreshed.accessToken,
+        refreshToken: refreshed.refreshToken
+      };
 
-    setSession(nextSession);
-    await secureSet(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
-    sessionRef.current = nextSession;
-    return nextSession;
+      setSession(nextSession);
+      await secureSet(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
+      sessionRef.current = nextSession;
+      lastAuthRefreshAtRef.current = Date.now();
+      return nextSession;
+    })();
+
+    authRefreshPromiseRef.current = refreshPromise;
+
+    try {
+      return await refreshPromise;
+    } finally {
+      if (authRefreshPromiseRef.current === refreshPromise) {
+        authRefreshPromiseRef.current = null;
+      }
+    }
   }, [backendOrigin, deviceProfile]);
 
   const apiFetch = useCallback(
@@ -910,7 +928,6 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       }
 
       try {
-        lastAuthRefreshAtRef.current = Date.now();
         await refreshAuthSession();
         console.log('[KrynoStartup] auth session refreshed', reason);
       } catch (refreshError) {
@@ -1722,20 +1739,26 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
     void (async () => {
       try {
-        const registration = await registerKrynoPushToken();
-        if (cancelled || !registration) {
+        const registrations = await registerKrynoPushToken();
+        if (cancelled || registrations.length === 0) {
           return;
         }
 
-        await apiFetch<PushTokenRegistrationResponse>('/devices/push-token', {
-          method: 'POST',
-          body: JSON.stringify({
-            provider: registration.provider,
-            pushToken: registration.token,
-            platform: registration.platform,
-            deviceId: deviceProfile.deviceId
-          })
-        });
+        for (const registration of registrations) {
+          if (cancelled) {
+            return;
+          }
+
+          await apiFetch<PushTokenRegistrationResponse>('/devices/push-token', {
+            method: 'POST',
+            body: JSON.stringify({
+              provider: registration.provider,
+              pushToken: registration.token,
+              platform: registration.platform,
+              deviceId: deviceProfile.deviceId
+            })
+          });
+        }
         console.log('[KrynoNotifications] push token synced');
       } catch (notificationError) {
         const message =
