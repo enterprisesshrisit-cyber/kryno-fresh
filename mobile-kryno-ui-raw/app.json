@@ -2,7 +2,7 @@
   "expo": {
     "name": "KRYNO",
     "slug": "kryno",
-    "version": "1.0.33",
+    "version": "1.0.34",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -48,7 +48,7 @@
         "android.permission.READ_EXTERNAL_STORAGE"
       ],
       "package": "com.kryno.mobile",
-      "versionCode": 33
+      "versionCode": 34
     },
     "web": {
       "favicon": "./assets/favicon.png"
