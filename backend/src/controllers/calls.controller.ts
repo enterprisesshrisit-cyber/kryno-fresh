@@ -26,6 +26,8 @@ export async function getIceConfigController(_request: FastifyRequest, reply: Fa
 
   if (stunUrls.length > 0) {
     iceServers.push({ urls: stunUrls });
+  } else {
+    iceServers.push({ urls: ['stun:stun.l.google.com:19302'] });
   }
 
   if (turnUrls.length > 0 && turnUsername && turnCredential) {
