@@ -961,6 +961,7 @@ export function connectMobileDirectRelay(
     onMessage?: (message: MobileSignalEnvelope) => void | Promise<void>;
     onCallEvent?: (event: RelayCallEvent) => void | Promise<void>;
     onStatus?: (status: 'connecting' | 'connected' | 'disconnected' | 'error', detail?: string) => void;
+    getSession?: () => AuthSession | null;
   }
 ) {
   let disposed = false;
@@ -991,8 +992,11 @@ export function connectMobileDirectRelay(
     connectionWaiters.clear();
   };
 
+  const getCurrentSession = () => handlers.getSession?.() ?? session;
+
   const openSocket = async () => {
-    await ensureLocalBundle(origin, session, deviceProfile);
+    const activeSession = getCurrentSession();
+    await ensureLocalBundle(origin, activeSession, deviceProfile);
     if (disposed) {
       return;
     }
@@ -1003,7 +1007,7 @@ export function connectMobileDirectRelay(
     socket.onopen = () => {
       open = true;
       authenticated = false;
-      socket?.send(JSON.stringify({ type: 'auth', accessToken: session.accessToken }));
+      socket?.send(JSON.stringify({ type: 'auth', accessToken: getCurrentSession().accessToken }));
       clearHeartbeat();
       heartbeatTimer = setInterval(() => {
         if (socket && socket.readyState === WebSocket.OPEN) {
@@ -1042,11 +1046,12 @@ export function connectMobileDirectRelay(
           if (!('message' in payload) || payload.message.encryptedContentType !== 'signal') {
             return;
           }
-          const localMessage = await processIncomingMessage(origin, session, deviceProfile, payload.message);
+          const activeSession = getCurrentSession();
+          const localMessage = await processIncomingMessage(origin, activeSession, deviceProfile, payload.message);
           if (localMessage) {
             await handlers.onMessage?.(localMessage);
           }
-          await apiJson(origin, session.accessToken, '/messages/ack', {
+          await apiJson(origin, activeSession.accessToken, '/messages/ack', {
             method: 'POST',
             body: JSON.stringify({ messageIds: [payload.message.messageId] })
           });
