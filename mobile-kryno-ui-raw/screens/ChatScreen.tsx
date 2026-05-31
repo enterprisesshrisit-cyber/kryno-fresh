@@ -53,6 +53,28 @@ function formatDuration(seconds?: number) {
 }
 const REACTIONS = ['✦', '🌙', '🔥', '❤️', '🧠', '👏'];
 
+function safeComposerError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+
+  if (/refresh token reuse|invalid refresh token|refresh token expired|access token expired|please refresh your session|device mismatch/i.test(message)) {
+    return 'Session expired, please login again.';
+  }
+
+  if (/secure relay is reconnecting|secure relay is not connected|direct relay socket|relay error/i.test(message)) {
+    return 'Connecting call service. Please try again in a few seconds.';
+  }
+
+  if (/rate limit/i.test(message)) {
+    return 'Please wait a moment before trying again.';
+  }
+
+  if (/provider does not exist|push_provider|column .* does not exist/i.test(message)) {
+    return 'Kryno is finishing a service update. Please reopen the app and try again.';
+  }
+
+  return message || fallback;
+}
+
 // ─── CHAT THEMES ─────────────────────────────────────────────────────────────
 const CHAT_THEMES: { id: ChatThemeType; label: string; icon: string; accent: string }[] = [
   { id: 'dark_glass',    label: 'Dark Glass',   icon: '🌌', accent: '#6366F1' },
@@ -75,13 +97,9 @@ const MENU_PRIMARY: MenuItem[] = [
   { id: 'focus',   icon: '🧠', label: 'Focus Mode',        toggle: true },
   { id: 'mute',    icon: '🔕', label: 'Mute Notifications', toggle: true },
   { id: 'private', icon: '🔒', label: 'Private Chat Mode',  toggle: true },
-  { id: 'music',   icon: '🎧', label: 'Chat Music / Vibe' },
 ];
 
-const MENU_DESTRUCTIVE: MenuItem[] = [
-  { id: 'block',  icon: '🚫', label: 'Block User',  destructive: true },
-  { id: 'report', icon: '⚠️', label: 'Report',      destructive: true },
-];
+const MENU_DESTRUCTIVE: MenuItem[] = [];
 
 // ─── THEME PICKER SHEET ───────────────────────────────────────────────────────
 function ThemeSheet({
@@ -212,19 +230,20 @@ function MenuPopup({
             />
           ))}
 
-          {/* Separator */}
-          <View style={styles.popupSectionDivider} />
-
-          {/* Destructive items */}
-          {MENU_DESTRUCTIVE.map((item, idx) => (
-            <MenuRow
-              key={item.id}
-              item={item}
-              isOn={false}
-              onPress={() => onAction(item.id)}
-              showDivider={idx < MENU_DESTRUCTIVE.length - 1}
-            />
-          ))}
+          {MENU_DESTRUCTIVE.length > 0 && (
+            <>
+              <View style={styles.popupSectionDivider} />
+              {MENU_DESTRUCTIVE.map((item, idx) => (
+                <MenuRow
+                  key={item.id}
+                  item={item}
+                  isOn={false}
+                  onPress={() => onAction(item.id)}
+                  showDivider={idx < MENU_DESTRUCTIVE.length - 1}
+                />
+              ))}
+            </>
+          )}
         </LinearGradient>
       </Animated.View>
     </Modal>
@@ -434,7 +453,7 @@ function VoiceMessageBubble({
       player.play();
       setPlaying(true);
     } catch (error) {
-      Alert.alert('Playback failed', error instanceof Error ? error.message : 'Unable to play this voice note.');
+      Alert.alert('Playback failed', safeComposerError(error, 'Unable to play this voice note.'));
     }
   };
 
@@ -739,7 +758,7 @@ export default function ChatScreen({ route, navigation }: any) {
       setInput(nextText);
       Alert.alert(
         'Message failed',
-        error instanceof Error ? error.message : 'Unable to send this message right now.'
+        safeComposerError(error, 'Unable to send this message right now.')
       );
     }
   };
@@ -785,7 +804,7 @@ export default function ChatScreen({ route, navigation }: any) {
     } catch (callError) {
       Alert.alert(
         'Call failed',
-        callError instanceof Error ? callError.message : 'Unable to start audio call right now.'
+        safeComposerError(callError, 'Unable to start audio call right now.')
       );
     }
   };
@@ -806,7 +825,7 @@ export default function ChatScreen({ route, navigation }: any) {
     } catch (callError) {
       Alert.alert(
         'Video call failed',
-        callError instanceof Error ? callError.message : 'Unable to start video call right now.'
+        safeComposerError(callError, 'Unable to start video call right now.')
       );
     }
   };
@@ -848,7 +867,7 @@ export default function ChatScreen({ route, navigation }: any) {
         }
       );
     } catch (error) {
-      Alert.alert('Media failed', error instanceof Error ? error.message : 'Unable to attach media right now.');
+      Alert.alert('Media failed', safeComposerError(error, 'Unable to attach media right now.'));
     } finally {
       setComposerBusy(false);
     }
@@ -882,7 +901,7 @@ export default function ChatScreen({ route, navigation }: any) {
           }
         );
       } catch (error) {
-        Alert.alert('Voice note failed', error instanceof Error ? error.message : 'Unable to send this voice note.');
+        Alert.alert('Voice note failed', safeComposerError(error, 'Unable to send this voice note.'));
       } finally {
         setComposerBusy(false);
       }
@@ -901,7 +920,7 @@ export default function ChatScreen({ route, navigation }: any) {
       await audioRecorder.prepareToRecordAsync();
       audioRecorder.record();
     } catch (error) {
-      Alert.alert('Recording failed', error instanceof Error ? error.message : 'Unable to start recording.');
+      Alert.alert('Recording failed', safeComposerError(error, 'Unable to start recording.'));
     } finally {
       setComposerBusy(false);
     }
