@@ -74,6 +74,7 @@ const envSchema = z.object({
   FIREBASE_CLIENT_EMAIL: z.string().optional(),
   FIREBASE_PRIVATE_KEY: z.string().optional(),
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
+  FIREBASE_SERVICE_ACCOUNT_JSON_PATH: z.string().optional(),
   SENTRY_DSN: z.string().url().optional(),
   WAF_PROVIDER: z.enum(['none', 'cloudflare', 'custom']).default('none'),
   SECURITY_ALERT_EMAIL: z.string().email().optional(),
