@@ -2,6 +2,7 @@ import { pool } from '../db/pool.js';
 import { env } from '../config/env.js';
 import { captureException } from './observability.service.js';
 import { importPKCS8, SignJWT } from 'jose';
+import { readFileSync } from 'node:fs';
 
 type PushTarget = {
   session_id: string;
@@ -58,7 +59,20 @@ function normalizeFirebasePrivateKey(value: string) {
 }
 
 function parseFirebaseServiceAccountJson() {
-  const raw = env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
+  let raw = env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
+  const path = env.FIREBASE_SERVICE_ACCOUNT_JSON_PATH?.trim();
+  if (!raw && path) {
+    try {
+      raw = readFileSync(path, 'utf8').trim();
+    } catch (error) {
+      captureException(error, {
+        surface: 'PushService',
+        reason: 'firebase_service_account_file_read_failed'
+      });
+      return null;
+    }
+  }
+
   if (!raw) {
     return null;
   }
