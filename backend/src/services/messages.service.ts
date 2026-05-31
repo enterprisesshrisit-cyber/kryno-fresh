@@ -7,10 +7,11 @@ import { relayService } from './relay.service.js';
 const DEFAULT_QUEUE_TTL_HOURS = 24 * 365;
 const MAX_TTL_HOURS = 24 * 365;
 
-async function trySendMessagePush(recipientUserId: string, excludeSessionIds?: string[]) {
+async function trySendMessagePush(recipientUserId: string, senderUsername?: string, excludeSessionIds?: string[]) {
   try {
     return await pushService.sendDirectMessageNotification({
       recipientUserId,
+      senderUsername,
       excludeSessionIds
     });
   } catch (error) {
@@ -57,6 +58,16 @@ export class MessagesService {
       );
 
       const recipient = recipientResult.rows[0];
+      const senderResult = await client.query<{ username: string }>(
+        `
+          select username
+          from users
+          where id = $1
+          limit 1
+        `,
+        [input.senderUserId]
+      );
+      const senderUsername = senderResult.rows[0]?.username;
 
       if (!recipient) {
         throw new AppError(404, 'Recipient not found.', 'RECIPIENT_NOT_FOUND');
@@ -106,7 +117,7 @@ export class MessagesService {
       });
 
       if (relayResult.delivered) {
-        const pushResult = await trySendMessagePush(recipient.id, relayResult.deliveredSessionIds);
+        const pushResult = await trySendMessagePush(recipient.id, senderUsername, relayResult.deliveredSessionIds);
 
         return {
           messageId: input.messageId,
@@ -168,7 +179,7 @@ export class MessagesService {
       );
 
       const row = inserted.rows[0];
-      const pushResult = await trySendMessagePush(row.recipient_user_id);
+      const pushResult = await trySendMessagePush(row.recipient_user_id, senderUsername);
 
       return {
         messageId: row.message_id,
