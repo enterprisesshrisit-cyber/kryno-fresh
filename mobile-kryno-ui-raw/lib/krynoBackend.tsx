@@ -409,6 +409,8 @@ const BUILD_LOCKED_BACKEND_ORIGIN = !__DEV__ && DEFAULT_BACKEND_ORIGIN.trim()
   : '';
 const STABLE_STARTUP_MODE = process.env.EXPO_PUBLIC_KRYNO_STABLE_STARTUP === 'true';
 const ACCESS_TOKEN_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const SESSION_EXPIRED_MESSAGE = 'Session expired, please login again.';
+const CALL_SERVICE_RECONNECTING_MESSAGE = 'Connecting call service. Please try again in a few seconds.';
 
 const TIER_SEQUENCE = ['Basic', 'Inner Circle', 'Elite'] as const;
 const MOOD_SEQUENCE = ['chill', 'social', 'focus'] as const;
@@ -599,6 +601,33 @@ function createUuid() {
 function isAccessTokenExpiredError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error ?? '');
   return /access token expired|please refresh your session/i.test(message);
+}
+
+function isUnrecoverableAuthError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /session expired|refresh token reuse|invalid refresh token|refresh token expired|refresh token does not match|device mismatch|REFRESH_REUSE_DETECTED|INVALID_REFRESH_TOKEN|REFRESH_EXPIRED|DEVICE_MISMATCH/i.test(message);
+}
+
+function safeUserFacingError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+
+  if (isUnrecoverableAuthError(message) || /access token expired|please refresh your session/i.test(message)) {
+    return SESSION_EXPIRED_MESSAGE;
+  }
+
+  if (/secure relay is reconnecting|secure relay is not connected|direct relay socket|relay error/i.test(message)) {
+    return CALL_SERVICE_RECONNECTING_MESSAGE;
+  }
+
+  if (/rate limit/i.test(message)) {
+    return 'Please wait a moment before trying again.';
+  }
+
+  if (/provider does not exist|push_provider|column .* does not exist/i.test(message)) {
+    return 'Kryno is finishing a service update. Please reopen the app and try again.';
+  }
+
+  return message || fallback;
 }
 
 function getRateLimitRetrySeconds(error: unknown) {
@@ -807,6 +836,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const pendingCallMediaKeysRef = useRef<Map<string, MobileSignalCallMediaKey>>(new Map());
   const lastAuthRefreshAtRef = useRef(0);
   const authRefreshPromiseRef = useRef<Promise<AuthSession> | null>(null);
+  const sessionRecoveryHandledRef = useRef(false);
 
   const loadMobileCallRuntime = useCallback(async () => {
     if (!mobileCallRuntimeRef.current) {
@@ -826,6 +856,35 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     currentCallRef.current = currentCall;
   }, [currentCall]);
 
+  const clearUnrecoverableSession = useCallback(async () => {
+    if (sessionRecoveryHandledRef.current) {
+      return;
+    }
+
+    sessionRecoveryHandledRef.current = true;
+    authRefreshPromiseRef.current = null;
+    relayHandleRef.current?.disconnect();
+    relayHandleRef.current = null;
+    peerConnectionRef.current?.close?.();
+    peerConnectionRef.current = null;
+    peerConnectionCallIdRef.current = null;
+    localCallStreamRef.current?.getTracks?.().forEach((track: any) => track.stop?.());
+    remoteCallStreamRef.current?.getTracks?.().forEach((track: any) => track.stop?.());
+    localCallStreamRef.current = null;
+    remoteCallStreamRef.current = null;
+    pendingIceCandidatesRef.current.clear();
+    setLocalCallStreamUrl(null);
+    setRemoteCallStreamUrl(null);
+    setCurrentCall(null);
+    setSession(null);
+    sessionRef.current = null;
+    setBootstrap(null);
+    setProfile(null);
+    setBillingEntitlement(FREE_BILLING_ENTITLEMENT);
+    await secureDelete(SESSION_STORAGE_KEY);
+    setError(SESSION_EXPIRED_MESSAGE);
+  }, []);
+
   const refreshAuthSession = useCallback(async () => {
     if (authRefreshPromiseRef.current) {
       return authRefreshPromiseRef.current;
@@ -839,27 +898,37 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     }
 
     const refreshPromise = (async () => {
-      const refreshResponse = await fetchWithTimeout(`${apiOrigin}/api/auth/refresh`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          refresh_token: activeSession.refreshToken,
-          device_id: deviceProfile.deviceId
-        })
-      });
+      try {
+        const refreshResponse = await fetchWithTimeout(`${apiOrigin}/api/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            refresh_token: activeSession.refreshToken,
+            device_id: deviceProfile.deviceId
+          })
+        });
 
-      const refreshed = await parseJsonResponse<{ accessToken: string; refreshToken: string }>(refreshResponse);
-      const nextSession = {
-        ...activeSession,
-        accessToken: refreshed.accessToken,
-        refreshToken: refreshed.refreshToken
-      };
+        const refreshed = await parseJsonResponse<{ accessToken: string; refreshToken: string }>(refreshResponse);
+        const nextSession = {
+          ...activeSession,
+          accessToken: refreshed.accessToken,
+          refreshToken: refreshed.refreshToken
+        };
 
-      setSession(nextSession);
-      await secureSet(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
-      sessionRef.current = nextSession;
-      lastAuthRefreshAtRef.current = Date.now();
-      return nextSession;
+        sessionRecoveryHandledRef.current = false;
+        setSession(nextSession);
+        await secureSet(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
+        sessionRef.current = nextSession;
+        lastAuthRefreshAtRef.current = Date.now();
+        return nextSession;
+      } catch (refreshError) {
+        if (isUnrecoverableAuthError(refreshError)) {
+          await clearUnrecoverableSession();
+          throw new Error(SESSION_EXPIRED_MESSAGE);
+        }
+
+        throw refreshError;
+      }
     })();
 
     authRefreshPromiseRef.current = refreshPromise;
@@ -871,7 +940,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         authRefreshPromiseRef.current = null;
       }
     }
-  }, [backendOrigin, deviceProfile]);
+  }, [backendOrigin, clearUnrecoverableSession, deviceProfile]);
 
   const apiFetch = useCallback(
     async <T,>(path: string, init: ApiFetchInit = {}, allowRefresh = true): Promise<T> => {
@@ -933,7 +1002,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       } catch (refreshError) {
         console.warn(
           '[KrynoStartup] auth session refresh failed',
-          refreshError instanceof Error ? refreshError.message : 'unknown'
+          safeUserFacingError(refreshError, 'session refresh failed')
         );
       }
     };
@@ -1684,6 +1753,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           onCallEvent: async (event) => {
             await handleRelayCallEventRef.current?.(event);
           },
+          getSession: () => sessionRef.current,
           onStatus: (status, detail) => {
             if (status === 'connected') {
               setError('');
@@ -1694,14 +1764,14 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
               void refreshAuthSession().catch((refreshError) => {
                 console.warn(
                   '[KrynoStartup] relay token refresh failed',
-                  refreshError instanceof Error ? refreshError.message : 'unknown'
+                  safeUserFacingError(refreshError, 'session refresh failed')
                 );
               });
               return;
             }
 
             if (status === 'error' && detail) {
-              setError(detail);
+              setError(safeUserFacingError(detail, 'Secure relay is temporarily unavailable.'));
             }
           }
         });
@@ -1709,7 +1779,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         relayHandleRef.current = relay;
       } catch (relayError) {
         if (!cancelled) {
-          setError(relayError instanceof Error ? relayError.message : 'Secure relay is temporarily unavailable.');
+          setError(safeUserFacingError(relayError, 'Secure relay is temporarily unavailable.'));
         }
       }
     })();
@@ -1808,6 +1878,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         });
 
         const nextSession = await parseJsonResponse<AuthSession>(response);
+        sessionRecoveryHandledRef.current = false;
         setSession(nextSession);
         sessionRef.current = nextSession;
         await secureSet(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
@@ -1998,6 +2069,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       setCurrentCall(null);
       setSession(null);
       sessionRef.current = null;
+      sessionRecoveryHandledRef.current = false;
       setBootstrap(null);
       setProfile(null);
       setBillingEntitlement(FREE_BILLING_ENTITLEMENT);
@@ -2352,33 +2424,53 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         throw new Error('Calls are disabled in this stable startup build while login stability is being verified.');
       }
 
-      if (!sessionRef.current || !deviceProfile || !relayHandleRef.current) {
-        throw new Error('Secure relay is not connected yet.');
+      if (!sessionRef.current || !deviceProfile) {
+        throw new Error(SESSION_EXPIRED_MESSAGE);
       }
 
-      const relayReady = await relayHandleRef.current.waitUntilConnected?.(6500);
+      const waitForRelayHandle = async (timeoutMs: number) => {
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < timeoutMs) {
+          if (relayHandleRef.current) {
+            return relayHandleRef.current;
+          }
+          await wait(250);
+        }
+        return relayHandleRef.current;
+      };
+
+      let relayHandle = await waitForRelayHandle(4000);
+      if (!relayHandle) {
+        throw new Error(CALL_SERVICE_RECONNECTING_MESSAGE);
+      }
+
+      let relayReady = await relayHandle.waitUntilConnected?.(15000);
       if (relayReady === false) {
-        throw new Error('Secure relay is reconnecting. Please try again in a moment.');
+        await refreshAuthSession().catch((error) => {
+          if (isUnrecoverableAuthError(error)) {
+            throw error;
+          }
+        });
+        await wait(900);
+        relayHandle = relayHandleRef.current ?? relayHandle;
+        relayReady = await relayHandle.waitUntilConnected?.(10000);
+      }
+
+      if (relayReady === false) {
+        throw new Error(CALL_SERVICE_RECONNECTING_MESSAGE);
       }
 
       const callId = createUuid();
       const roomName = createManagedCallRoomName(mode, callId);
-      let mediaProvider: CallStateModel['mediaProvider'] = 'livekit';
-      let liveKitToken: LiveKitCallToken | null = null;
-      let mediaEncryptionKey: string | null = null;
-
-      try {
-        liveKitToken = await createLiveKitCallToken({
-          mode,
-          recipientLookup: conversation.recipientLookup,
-          roomName
-        });
-      } catch {
-        mediaProvider = 'webrtc';
-        mediaEncryptionKey = null;
-        await fetchIceConfig();
-        await prepareLocalCallMedia(mode, false, mode === 'video');
-      }
+      const mediaProvider: CallStateModel['mediaProvider'] = 'livekit';
+      const mediaEncryptionKey: string | null = null;
+      const liveKitToken = await createLiveKitCallToken({
+        mode,
+        recipientLookup: conversation.recipientLookup,
+        roomName
+      }).catch((error) => {
+        throw new Error(safeUserFacingError(error, 'Managed call service is unavailable right now.'));
+      });
 
       setCurrentCall({
         callId,
@@ -2387,7 +2479,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         phase: 'ringing',
         mode,
         mediaProvider,
-        roomName: mediaProvider === 'livekit' ? roomName : null,
+        roomName,
         liveKitToken,
         mediaEncryptionKey,
         remoteLabel: conversation.user.name,
@@ -2395,26 +2487,24 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         muted: false,
         cameraEnabled: mode === 'video',
         status:
-          mediaProvider === 'livekit'
-            ? `Ringing ${conversation.user.name} through managed relay...`
-            : `Ringing ${conversation.user.name}...`,
+          `Ringing ${conversation.user.name} through managed relay...`,
         startedAt: new Date().toISOString()
       });
 
-      const sent = relayHandleRef.current.send({
+      const sent = relayHandle.send({
         type: 'call_invite',
         callId,
         recipientLookup: conversation.recipientLookup,
         mode,
         mediaProvider,
-        roomName: mediaProvider === 'livekit' ? roomName : undefined
+        roomName
       });
 
       if (!sent) {
-        throw new Error('Secure relay is not connected yet.');
+        throw new Error(CALL_SERVICE_RECONNECTING_MESSAGE);
       }
     },
-    [backendOrigin, createLiveKitCallToken, deviceProfile, fetchIceConfig, prepareLocalCallMedia]
+    [createLiveKitCallToken, deviceProfile, refreshAuthSession]
   );
 
   const acceptCurrentCall = useCallback(async () => {
@@ -3100,25 +3190,37 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         return;
       }
 
-      if (STABLE_STARTUP_MODE) {
-        const createdAt = new Date().toISOString();
-        setChatMessages((current) =>
-          [
+      const optimisticId = `local-${createUuid()}`;
+      const optimisticCreatedAt = new Date().toISOString();
+      const appendOptimisticMessage = (status: ChatMessageModel['status']) => {
+        setChatMessages((current) => {
+          if (current.some((entry) => entry.id === optimisticId)) {
+            return current.map((entry) => (entry.id === optimisticId ? { ...entry, status } : entry));
+          }
+
+          return [
             ...current,
             {
-              id: `local-${createUuid()}`,
+              id: optimisticId,
               conversationKey: conversation.conversationKey,
-              from: 'me' as 'me',
+              from: 'me' as const,
               text: trimmed,
-              time: formatClockTime(createdAt),
-              createdAt,
+              time: formatClockTime(optimisticCreatedAt),
+              createdAt: optimisticCreatedAt,
               reactions: [],
-              status: 'failed' as 'failed'
+              status,
+              kind: 'text' as const
             }
-          ].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-        );
+          ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+        });
+      };
+
+      if (STABLE_STARTUP_MODE) {
+        appendOptimisticMessage('failed');
         throw new Error('Secure chat is disabled in this stable startup build while login stability is being verified.');
       }
+
+      appendOptimisticMessage('sending');
 
       try {
         const { sendMobileDirectText } = await getMobileSignalModule();
@@ -3153,10 +3255,14 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         }
 
         if (secureMessage) {
+          setChatMessages((current) => current.filter((entry) => entry.id !== optimisticId));
           ingestSignalMessages([secureMessage], { markUnread: false });
         }
       } catch (sendError) {
-        throw sendError;
+        setChatMessages((current) =>
+          current.map((entry) => (entry.id === optimisticId ? { ...entry, status: 'failed' as const } : entry))
+        );
+        throw new Error(safeUserFacingError(sendError, 'Unable to send this message right now.'));
       }
     },
     [backendOrigin, deviceProfile, ingestSignalMessages, refreshAuthSession]
@@ -3181,39 +3287,43 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         throw new Error('Secure attachments are disabled in this stable startup build while login stability is being verified.');
       }
 
-      const { sendMobileDirectAttachment } = await getMobileSignalModule();
-      let activeSession = sessionRef.current;
-      let secureMessage;
+      try {
+        const { sendMobileDirectAttachment } = await getMobileSignalModule();
+        let activeSession = sessionRef.current;
+        let secureMessage;
 
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-          secureMessage = await sendMobileDirectAttachment(
-            requireBackendOrigin(backendOrigin),
-            activeSession,
-            deviceProfile,
-            conversation.recipientLookup,
-            input
-          );
-          break;
-        } catch (sendError) {
-          if (attempt === 0 && isAccessTokenExpiredError(sendError)) {
-            activeSession = await refreshAuthSession();
-            continue;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            secureMessage = await sendMobileDirectAttachment(
+              requireBackendOrigin(backendOrigin),
+              activeSession,
+              deviceProfile,
+              conversation.recipientLookup,
+              input
+            );
+            break;
+          } catch (sendError) {
+            if (attempt === 0 && isAccessTokenExpiredError(sendError)) {
+              activeSession = await refreshAuthSession();
+              continue;
+            }
+
+            const retrySeconds = attempt === 0 ? getRateLimitRetrySeconds(sendError) : null;
+            if (retrySeconds) {
+              await wait(retrySeconds * 1000 + 250);
+              activeSession = sessionRef.current ?? activeSession;
+              continue;
+            }
+
+            throw sendError;
           }
-
-          const retrySeconds = attempt === 0 ? getRateLimitRetrySeconds(sendError) : null;
-          if (retrySeconds) {
-            await wait(retrySeconds * 1000 + 250);
-            activeSession = sessionRef.current ?? activeSession;
-            continue;
-          }
-
-          throw sendError;
         }
-      }
 
-      if (secureMessage) {
-        ingestSignalMessages([secureMessage], { markUnread: false });
+        if (secureMessage) {
+          ingestSignalMessages([secureMessage], { markUnread: false });
+        }
+      } catch (sendError) {
+        throw new Error(safeUserFacingError(sendError, 'Unable to send this attachment right now.'));
       }
     },
     [backendOrigin, deviceProfile, ingestSignalMessages, refreshAuthSession]
