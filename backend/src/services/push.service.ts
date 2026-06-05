@@ -14,6 +14,7 @@ type PushTarget = {
 type DirectMessagePushInput = {
   recipientUserId: string;
   senderUsername?: string;
+  senderPrivate?: boolean;
   excludeSessionIds?: string[];
 };
 
@@ -179,12 +180,17 @@ function stringifyPushData(data: Record<string, string>) {
 export class PushService {
   async sendDirectMessageNotification(input: DirectMessagePushInput) {
     const senderLabel = input.senderUsername?.trim();
+    const privateBody = 'Open Kryno to view it.';
     return this.sendNotificationToUser({
       recipientUserId: input.recipientUserId,
       excludeSessionIds: input.excludeSessionIds,
       payload: {
         title: 'New Kryno message',
-        body: senderLabel ? `${senderLabel} sent you a private message.` : 'You have a new private message.',
+        body: input.senderPrivate
+          ? privateBody
+          : senderLabel
+            ? `${senderLabel} sent you a private message.`
+            : 'You have a new private message.',
         channelId: 'kryno-messages',
         data: {
           type: 'direct_message'
