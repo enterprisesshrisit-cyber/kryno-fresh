@@ -45,6 +45,14 @@ type SocialProfile = {
   displayName: string;
   bio: string;
   avatarUrl: string | null;
+  profileVisibility?: 'public' | 'followers';
+  postsVisibility?: 'public' | 'followers';
+  messageVisibility?: 'public' | 'followers' | 'none';
+  privacy?: {
+    viewProfile: boolean;
+    viewPosts: boolean;
+    message: boolean;
+  };
   followersCount: number;
   followingCount: number;
   isFollowing: boolean;
@@ -128,6 +136,19 @@ type LiveKitCallToken = {
   e2eeRequired: boolean;
 };
 
+type ConversationSettings = {
+  peerUserId: string;
+  peerUsername: string;
+  themeId: ChatThemeId;
+  muted: boolean;
+  focusMode: boolean;
+  privateMode: boolean;
+  blockedByMe: boolean;
+  reportedByMe: boolean;
+};
+
+type ChatThemeId = 'dark_glass' | 'breathing_3d' | 'minimal_calm' | 'premium_aura';
+
 type SearchUser = {
   id: string;
   username: string;
@@ -165,7 +186,13 @@ type StoryModel = typeof STORIES[number] & {
   expiresAt?: string;
   createdAt?: string;
 };
-type MeModel = typeof ME;
+type MeModel = typeof ME & {
+  profilePrivacy?: {
+    viewProfile: boolean;
+    viewPosts: boolean;
+    message: boolean;
+  };
+};
 type FeaturedMemberModel = typeof FEATURED_MEMBERS[number] & {
   isFollowing?: boolean;
 };
@@ -324,6 +351,14 @@ type KrynoBackendContextValue = {
   discoverCategories: typeof DISCOVER_CATEGORIES;
   profilePosts: ProfilePostModel[];
   conversationSeeds: ConversationSeed[];
+  getConversationSettings: (peerLookup: string) => Promise<ConversationSettings>;
+  updateConversationSettings: (
+    peerLookup: string,
+    input: Partial<Pick<ConversationSettings, 'themeId' | 'muted' | 'focusMode' | 'privateMode'>>
+  ) => Promise<ConversationSettings>;
+  blockUser: (peerLookup: string) => Promise<ConversationSettings>;
+  unblockUser: (peerLookup: string) => Promise<ConversationSettings>;
+  reportUser: (peerLookup: string, input?: { category?: string; description?: string }) => Promise<{ reportId: string; createdAt: string }>;
   getConversationMessages: (conversationKey: string) => ChatMessageModel[];
   sendConversationMessage: (conversation: Pick<ConversationSeed, 'conversationKey' | 'recipientLookup' | 'user'>, text: string) => Promise<void>;
   sendConversationAttachment: (
@@ -357,7 +392,13 @@ type KrynoBackendContextValue = {
   commentOnPost: (postId: string, body: string) => Promise<void>;
   deletePost: (postId: string) => Promise<void>;
   toggleFollow: (username: string, isFollowing: boolean) => Promise<void>;
-  saveProfile: (input: { displayName: string; bio: string }) => Promise<void>;
+  saveProfile: (input: {
+    displayName?: string;
+    bio?: string;
+    profileVisibility?: 'public' | 'followers';
+    postsVisibility?: 'public' | 'followers';
+    messageVisibility?: 'public' | 'followers' | 'none';
+  }) => Promise<void>;
   uploadProfilePhoto: (input: MediaUploadInput) => Promise<void>;
   createPostFromMedia: (input: {
     uri: string;
@@ -834,6 +875,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const peerConnectionCallIdRef = useRef<string | null>(null);
   const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const pendingCallMediaKeysRef = useRef<Map<string, MobileSignalCallMediaKey>>(new Map());
+  const callConnectedNotifiedRef = useRef<Set<string>>(new Set());
   const lastAuthRefreshAtRef = useRef(0);
   const authRefreshPromiseRef = useRef<Promise<AuthSession> | null>(null);
   const sessionRecoveryHandledRef = useRef(false);
@@ -2141,6 +2183,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       const activeCall = currentCallRef.current;
       if (activeCall) {
         appendCallTimelineMessage(activeCall.conversationKey, summary);
+        callConnectedNotifiedRef.current.delete(activeCall.callId);
       }
       teardownCallMedia();
       setCurrentCall(null);
@@ -2519,6 +2562,33 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         return;
       }
 
+      console.log('[KrynoCall] accept requested', {
+        callId: activeCall.callId,
+        mode: activeCall.mode,
+        mediaProvider: activeCall.mediaProvider,
+        roomName: activeCall.roomName
+      });
+
+      const accepted = relayHandleRef.current.send({
+        type: 'call_accept',
+        callId: activeCall.callId
+      });
+
+      if (!accepted) {
+        finishCurrentCall('Call failed: call service is reconnecting');
+        return;
+      }
+
+      setCurrentCall((current) =>
+        current
+          ? {
+              ...current,
+              phase: 'connecting',
+              status: 'Answer accepted. Preparing LiveKit media room...'
+            }
+          : current
+      );
+
       try {
         const token = await createLiveKitCallToken({
           mode: activeCall.mode,
@@ -2536,17 +2606,21 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
               }
             : current
         );
+        console.log('[KrynoCall] receiver livekit token ready', {
+          callId: activeCall.callId,
+          roomName: activeCall.roomName
+        });
       } catch (callTokenError) {
+        relayHandleRef.current?.send({
+          type: 'call_end',
+          callId: activeCall.callId,
+          reason: 'failed'
+        });
         finishCurrentCall(
           `Call failed: ${callTokenError instanceof Error ? callTokenError.message : 'managed media token unavailable'}`
         );
         return;
       }
-
-      relayHandleRef.current.send({
-        type: 'call_accept',
-        callId: activeCall.callId
-      });
       return;
     }
 
@@ -2629,6 +2703,24 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
   const updateCurrentCallTransport = useCallback(
     (input: { phase?: CallStateModel['phase']; status: string; connectedAt?: string }) => {
+      const activeCall = currentCallRef.current;
+      if (
+        input.phase === 'connected' &&
+        activeCall &&
+        !callConnectedNotifiedRef.current.has(activeCall.callId)
+      ) {
+        callConnectedNotifiedRef.current.add(activeCall.callId);
+        console.log('[KrynoCall] live media connected', {
+          callId: activeCall.callId,
+          mode: activeCall.mode,
+          mediaProvider: activeCall.mediaProvider
+        });
+        relayHandleRef.current?.send({
+          type: 'call_connected',
+          callId: activeCall.callId
+        });
+      }
+
       setCurrentCall((current) =>
         current
           ? {
@@ -2814,12 +2906,21 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   );
 
   const saveProfile = useCallback(
-    async (input: { displayName: string; bio: string }) => {
+    async (input: {
+      displayName?: string;
+      bio?: string;
+      profileVisibility?: 'public' | 'followers';
+      postsVisibility?: 'public' | 'followers';
+      messageVisibility?: 'public' | 'followers' | 'none';
+    }) => {
       const updated = await apiFetch<SocialProfile>('/social/profile/me', {
         method: 'PUT',
         body: JSON.stringify({
-          displayName: input.displayName.trim(),
-          bio: input.bio.trim()
+          ...(input.displayName !== undefined ? { displayName: input.displayName.trim() } : {}),
+          ...(input.bio !== undefined ? { bio: input.bio.trim() } : {}),
+          ...(input.profileVisibility !== undefined ? { profileVisibility: input.profileVisibility } : {}),
+          ...(input.postsVisibility !== undefined ? { postsVisibility: input.postsVisibility } : {}),
+          ...(input.messageVisibility !== undefined ? { messageVisibility: input.messageVisibility } : {})
         })
       });
 
@@ -3050,6 +3151,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       joinDate: 'Today',
       status: 'active' as const,
       mood: 'chill' as const,
+      profilePrivacy: { viewProfile: true, viewPosts: true, message: true },
       interests: [],
       identityTags: [],
       stats: { posts: 0, followers: 0, following: 0, visits: 0 },
@@ -3075,6 +3177,11 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       tier: pickTier(seed),
       status: 'active',
       mood: pickMood(seed),
+      profilePrivacy: source.privacy ?? {
+        viewProfile: source.profileVisibility !== 'followers',
+        viewPosts: source.postsVisibility !== 'followers',
+        message: source.messageVisibility === undefined || source.messageVisibility === 'public'
+      },
       stats: {
         posts: ownPostsCount,
         followers: Number(source.followersCount ?? 0),
@@ -3183,6 +3290,57 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     [chatMessages]
   );
 
+  const getConversationSettings = useCallback(
+    async (peerLookup: string) =>
+      apiFetch<ConversationSettings>(`/messages/settings/${encodeURIComponent(peerLookup.replace(/^@/, '').trim())}`),
+    [apiFetch]
+  );
+
+  const updateConversationSettings = useCallback(
+    async (
+      peerLookup: string,
+      input: Partial<Pick<ConversationSettings, 'themeId' | 'muted' | 'focusMode' | 'privateMode'>>
+    ) =>
+      apiFetch<ConversationSettings>(`/messages/settings/${encodeURIComponent(peerLookup.replace(/^@/, '').trim())}`, {
+        method: 'PUT',
+        body: JSON.stringify(input)
+      }),
+    [apiFetch]
+  );
+
+  const blockUser = useCallback(
+    async (peerLookup: string) =>
+      apiFetch<ConversationSettings>(`/messages/block/${encodeURIComponent(peerLookup.replace(/^@/, '').trim())}`, {
+        method: 'POST',
+        body: JSON.stringify({})
+      }),
+    [apiFetch]
+  );
+
+  const unblockUser = useCallback(
+    async (peerLookup: string) =>
+      apiFetch<ConversationSettings>(`/messages/unblock/${encodeURIComponent(peerLookup.replace(/^@/, '').trim())}`, {
+        method: 'POST',
+        body: JSON.stringify({})
+      }),
+    [apiFetch]
+  );
+
+  const reportUser = useCallback(
+    async (peerLookup: string, input?: { category?: string; description?: string }) =>
+      apiFetch<{ reportId: string; createdAt: string }>(
+        `/messages/report/${encodeURIComponent(peerLookup.replace(/^@/, '').trim())}`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            category: input?.category ?? 'other',
+            description: input?.description ?? ''
+          })
+        }
+      ),
+    [apiFetch]
+  );
+
   const sendConversationMessage = useCallback(
     async (conversation: Pick<ConversationSeed, 'conversationKey' | 'recipientLookup' | 'user'>, text: string) => {
       const trimmed = text.trim();
@@ -3255,8 +3413,30 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         }
 
         if (secureMessage) {
-          setChatMessages((current) => current.filter((entry) => entry.id !== optimisticId));
-          ingestSignalMessages([secureMessage], { markUnread: false });
+          setChatMessages((current) =>
+            current.map((entry) =>
+              entry.id === optimisticId
+                ? {
+                    ...entry,
+                    remoteMessageId: secureMessage.id,
+                    createdAt: secureMessage.createdAt,
+                    time: formatClockTime(secureMessage.createdAt),
+                    status: secureMessage.status ?? 'sent'
+                  }
+                : entry
+            )
+          );
+          setStoredThreads((current) =>
+            current.map((thread) =>
+              thread.conversationKey === conversation.conversationKey
+                ? {
+                    ...thread,
+                    lastMessage: trimmed,
+                    time: 'now'
+                  }
+                : thread
+            )
+          );
         }
       } catch (sendError) {
         setChatMessages((current) =>
@@ -3404,6 +3584,11 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       discoverCategories: DISCOVER_CATEGORIES,
       profilePosts,
       conversationSeeds,
+      getConversationSettings,
+      updateConversationSettings,
+      blockUser,
+      unblockUser,
+      reportUser,
       getConversationMessages,
       sendConversationMessage,
       sendConversationAttachment,
@@ -3460,6 +3645,11 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       discoverPosts,
       profilePosts,
       conversationSeeds,
+      getConversationSettings,
+      updateConversationSettings,
+      blockUser,
+      unblockUser,
+      reportUser,
       getConversationMessages,
       sendConversationMessage,
       sendConversationAttachment,

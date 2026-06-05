@@ -50,6 +50,11 @@ type CallEndCommand = {
   reason?: string;
 };
 
+type CallConnectedCommand = {
+  type: 'call_connected';
+  callId: string;
+};
+
 type CallSignalCommand = {
   type: 'call_signal';
   callId: string;
@@ -71,6 +76,7 @@ export type ClientRelayCommand =
   | CallAcceptCommand
   | CallRejectCommand
   | CallEndCommand
+  | CallConnectedCommand
   | CallSignalCommand;
 
 type ActiveCall = {
@@ -82,11 +88,28 @@ type ActiveCall = {
   recipientUsername: string;
   mediaProvider: 'livekit' | 'webrtc';
   roomName: string | null;
+  expiresAt: Date;
   invitedSessionIds: Set<string>;
   acceptedSessionId: string | null;
   state: 'ringing' | 'connecting' | 'connected';
   timeout: NodeJS.Timeout;
 };
+
+type PersistedCallState =
+  | 'ringing'
+  | 'connecting'
+  | 'connected'
+  | 'ended'
+  | 'missed'
+  | 'declined'
+  | 'cancelled'
+  | 'expired'
+  | 'unavailable'
+  | 'failed';
+
+function logCallEvent(event: string, details: Record<string, unknown>) {
+  console.log('[KrynoCalls]', event, details);
+}
 
 async function trySendCallPush(input: {
   recipientUserId: string;
@@ -178,7 +201,113 @@ export class CallsService {
     });
   }
 
+  private async persistCallStart(call: ActiveCall) {
+    try {
+      await pool.query(
+        `
+          insert into call_sessions (
+            call_id,
+            mode,
+            caller_user_id,
+            caller_device_session_id,
+            recipient_user_id,
+            media_provider,
+            room_name,
+            state,
+            started_at,
+            expires_at,
+            updated_at
+          )
+          values ($1, $2, $3, $4, $5, $6, $7, 'ringing', now(), $8, now())
+          on conflict (call_id) do update set
+            mode = excluded.mode,
+            caller_user_id = excluded.caller_user_id,
+            caller_device_session_id = excluded.caller_device_session_id,
+            recipient_user_id = excluded.recipient_user_id,
+            media_provider = excluded.media_provider,
+            room_name = excluded.room_name,
+            state = 'ringing',
+            accepted_device_session_id = null,
+            accepted_at = null,
+            connected_at = null,
+            ended_at = null,
+            end_reason = null,
+            expires_at = excluded.expires_at,
+            updated_at = now()
+        `,
+        [
+          call.callId,
+          call.mode,
+          call.callerUserId,
+          call.callerSessionId,
+          call.recipientUserId,
+          call.mediaProvider,
+          call.roomName,
+          call.expiresAt
+        ]
+      );
+    } catch (error) {
+      captureException(error, {
+        surface: 'CallsService',
+        reason: 'call_state_insert_failed',
+        callId: call.callId
+      });
+    }
+  }
+
+  private async persistCallState(
+    call: ActiveCall,
+    state: PersistedCallState,
+    options: {
+      acceptedSessionId?: string | null;
+      endReason?: string | null;
+    } = {}
+  ) {
+    try {
+      await pool.query(
+        `
+          update call_sessions
+          set
+            state = $2,
+            accepted_device_session_id = coalesce($3::uuid, accepted_device_session_id),
+            accepted_at = case when $2 in ('connecting', 'connected') and accepted_at is null then now() else accepted_at end,
+            connected_at = case when $2 = 'connected' and connected_at is null then now() else connected_at end,
+            ended_at = case when $2 in ('ended', 'missed', 'declined', 'cancelled', 'expired', 'unavailable', 'failed') then now() else ended_at end,
+            end_reason = coalesce($4, end_reason),
+            updated_at = now()
+          where call_id = $1
+        `,
+        [call.callId, state, options.acceptedSessionId ?? null, options.endReason ?? null]
+      );
+    } catch (error) {
+      captureException(error, {
+        surface: 'CallsService',
+        reason: 'call_state_update_failed',
+        callId: call.callId,
+        state
+      });
+    }
+  }
+
   private endCall(call: ActiveCall, reason: string, endedBySessionId?: string | null) {
+    const persistedState: PersistedCallState =
+      reason === 'missed' ||
+      reason === 'declined' ||
+      reason === 'cancelled' ||
+      reason === 'expired' ||
+      reason === 'unavailable'
+        ? reason
+        : 'ended';
+    logCallEvent('end', {
+      callId: call.callId,
+      state: call.state,
+      reason,
+      endedBySessionId: endedBySessionId ?? null
+    });
+    void this.persistCallState(call, persistedState, {
+      endReason: reason
+    });
+
     const participants = new Set<string>([call.callerSessionId, ...call.invitedSessionIds]);
     if (call.acceptedSessionId) {
       participants.add(call.acceptedSessionId);
@@ -235,6 +364,49 @@ export class CallsService {
     return result.rows[0]?.username ?? 'Unknown';
   }
 
+  private async getCallRestrictionReason(callerUserId: string, recipientUserId: string) {
+    const result = await pool.query<{
+      blocked: boolean;
+      message_visibility: string;
+      caller_follows_recipient: boolean;
+    }>(
+      `
+        select
+          exists(
+            select 1
+            from blocked_users
+            where (blocker_user_id = $1 and blocked_user_id = $2)
+               or (blocker_user_id = $2 and blocked_user_id = $1)
+          ) as blocked,
+          coalesce(up.message_visibility, 'public') as message_visibility,
+          exists(
+            select 1
+            from follows f
+            where f.follower_user_id = $1
+              and f.followee_user_id = $2
+          ) as caller_follows_recipient
+        from users u
+        left join user_profiles up on up.user_id = u.id
+        where u.id = $2
+        limit 1
+      `,
+      [callerUserId, recipientUserId]
+    );
+
+    const row = result.rows[0];
+    if (row?.blocked) {
+      return 'You cannot call this account.';
+    }
+    if (
+      row &&
+      (row.message_visibility === 'none' ||
+        (row.message_visibility === 'followers' && !row.caller_follows_recipient))
+    ) {
+      return 'This user is not accepting calls right now.';
+    }
+    return null;
+  }
+
   private requireLiveKitConfig() {
     if (!env.LIVEKIT_URL || !env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET) {
       throw new AppError(503, 'Managed call service is not configured yet.', 'LIVEKIT_NOT_CONFIGURED');
@@ -253,6 +425,14 @@ export class CallsService {
     const roomName = input.roomName?.trim() || `kryno-${input.mode}-${randomUUID()}`;
     const participantIdentity = `${auth.userId}:${auth.sessionId}`;
     let recipient: { id: string; username: string } | null = null;
+
+    logCallEvent('livekit_token_requested', {
+      userId: auth.userId,
+      sessionId: auth.sessionId,
+      mode: input.mode,
+      roomName,
+      hasRecipientLookup: Boolean(input.recipientLookup?.trim())
+    });
 
     if (input.recipientLookup?.trim()) {
       recipient = await this.resolveRecipient(input.recipientLookup);
@@ -311,6 +491,8 @@ export class CallsService {
         return this.rejectCall(auth, command);
       case 'call_end':
         return this.finishCall(auth, command);
+      case 'call_connected':
+        return this.markCallConnected(auth, command);
       case 'call_signal':
         return this.forwardSignal(auth, command);
       default:
@@ -354,6 +536,15 @@ export class CallsService {
     const callerUsername = await this.resolveUsername(auth.userId);
     const mediaProvider = command.mediaProvider === 'livekit' ? 'livekit' : 'webrtc';
     const roomName = mediaProvider === 'livekit' ? normalizeLiveKitRoomName(command.roomName) : null;
+    logCallEvent('invite_received', {
+      callId: command.callId,
+      callerUserId: auth.userId,
+      callerSessionId: auth.sessionId,
+      recipientLookup: command.recipientLookup,
+      mode: command.mode,
+      mediaProvider,
+      roomName
+    });
 
     if (mediaProvider === 'livekit' && !roomName) {
       relayService.sendEventToSession(auth.sessionId, {
@@ -382,8 +573,24 @@ export class CallsService {
       return;
     }
 
+    const restrictionReason = await this.getCallRestrictionReason(auth.userId, recipient.id);
+    if (restrictionReason) {
+      relayService.sendEventToSession(auth.sessionId, {
+        type: 'call_unavailable',
+        callId: command.callId,
+        reason: restrictionReason
+      });
+      return;
+    }
+
     const connectedSessionIds = relayService.listUserSessionIds(recipient.id);
     const invitedSessionIds = connectedSessionIds.filter((sessionId) => !this.sessionIsBusy(sessionId));
+    logCallEvent('recipient_sessions_resolved', {
+      callId: command.callId,
+      recipientUserId: recipient.id,
+      connectedSessionCount: connectedSessionIds.length,
+      invitedSessionCount: invitedSessionIds.length
+    });
 
     if (connectedSessionIds.length > 0 && invitedSessionIds.length === 0) {
       relayService.sendEventToSession(auth.sessionId, {
@@ -394,12 +601,17 @@ export class CallsService {
       return;
     }
 
+    const expiresAt = new Date(Date.now() + CALL_RING_TIMEOUT_MS);
     const timeout = setTimeout(() => {
       const call = this.callsById.get(command.callId);
       if (!call || call.acceptedSessionId) {
         return;
       }
 
+      logCallEvent('ring_timeout', {
+        callId: command.callId,
+        state: call.state
+      });
       this.endCall(call, 'missed', null);
     }, CALL_RING_TIMEOUT_MS);
 
@@ -412,6 +624,7 @@ export class CallsService {
       recipientUsername: recipient.username,
       mediaProvider,
       roomName,
+      expiresAt,
       invitedSessionIds: new Set(invitedSessionIds),
       acceptedSessionId: null,
       state: 'ringing',
@@ -420,12 +633,19 @@ export class CallsService {
 
     this.callsById.set(call.callId, call);
     this.attachSession(call.callId, auth.sessionId);
+    await this.persistCallStart(call);
 
     const pushResult = await trySendCallPush({
       recipientUserId: recipient.id,
       callerUsername,
       callId: call.callId,
       mode: call.mode
+    });
+    logCallEvent('invite_push_result', {
+      callId: call.callId,
+      attempted: pushResult.attempted,
+      sent: pushResult.sent,
+      failed: 'failed' in pushResult ? pushResult.failed : false
     });
 
     for (const sessionId of invitedSessionIds) {
@@ -455,9 +675,19 @@ export class CallsService {
     });
   }
 
-  private acceptCall(auth: RelayAuthContext, command: CallAcceptCommand) {
+  private async acceptCall(auth: RelayAuthContext, command: CallAcceptCommand) {
+    logCallEvent('accept_received', {
+      callId: command.callId,
+      userId: auth.userId,
+      sessionId: auth.sessionId
+    });
     const call = this.callsById.get(command.callId);
     if (!call) {
+      logCallEvent('accept_expired', {
+        callId: command.callId,
+        userId: auth.userId,
+        sessionId: auth.sessionId
+      });
       relayService.sendEventToSession(auth.sessionId, {
         type: 'call_ended',
         callId: command.callId,
@@ -468,6 +698,11 @@ export class CallsService {
     }
 
     if (!call.invitedSessionIds.has(auth.sessionId) || call.recipientUserId !== auth.userId) {
+      logCallEvent('accept_ignored_invalid_session', {
+        callId: command.callId,
+        userId: auth.userId,
+        sessionId: auth.sessionId
+      });
       return;
     }
 
@@ -485,6 +720,16 @@ export class CallsService {
     call.acceptedSessionId = auth.sessionId;
     call.state = 'connecting';
     this.attachSession(call.callId, auth.sessionId);
+    await this.persistCallState(call, 'connecting', {
+      acceptedSessionId: auth.sessionId
+    });
+    logCallEvent('accepted', {
+      callId: call.callId,
+      callerSessionId: call.callerSessionId,
+      acceptedSessionId: auth.sessionId,
+      mediaProvider: call.mediaProvider,
+      roomName: call.roomName
+    });
 
     for (const invitedSessionId of call.invitedSessionIds) {
       if (invitedSessionId !== auth.sessionId) {
@@ -555,6 +800,41 @@ export class CallsService {
     }
 
     this.endCall(call, normalizeReason(command.reason), auth.sessionId);
+  }
+
+  private async markCallConnected(auth: RelayAuthContext, command: CallConnectedCommand) {
+    const call = this.callsById.get(command.callId);
+    if (!call) {
+      logCallEvent('connected_ignored_missing_call', {
+        callId: command.callId,
+        userId: auth.userId,
+        sessionId: auth.sessionId
+      });
+      return;
+    }
+
+    const participantSessionIds = new Set<string>([call.callerSessionId]);
+    if (call.acceptedSessionId) {
+      participantSessionIds.add(call.acceptedSessionId);
+    }
+
+    if (!participantSessionIds.has(auth.sessionId)) {
+      logCallEvent('connected_ignored_invalid_session', {
+        callId: call.callId,
+        userId: auth.userId,
+        sessionId: auth.sessionId
+      });
+      return;
+    }
+
+    call.state = 'connected';
+    await this.persistCallState(call, 'connected');
+    logCallEvent('connected', {
+      callId: call.callId,
+      sessionId: auth.sessionId,
+      mediaProvider: call.mediaProvider,
+      roomName: call.roomName
+    });
   }
 
   private forwardSignal(auth: RelayAuthContext, command: CallSignalCommand) {

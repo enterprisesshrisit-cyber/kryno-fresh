@@ -21,6 +21,9 @@ type UpdateProfileInput = {
   displayName?: string;
   bio?: string;
   avatarMediaId?: string | null;
+  profileVisibility?: 'public' | 'followers';
+  postsVisibility?: 'public' | 'followers';
+  messageVisibility?: 'public' | 'followers' | 'none';
 };
 
 type CreatePostInput = {
@@ -47,6 +50,9 @@ type ProfileRow = {
   display_name: string;
   bio: string;
   avatar_url: string | null;
+  profile_visibility: string;
+  posts_visibility: string;
+  message_visibility: string;
   followers_count: number;
   following_count: number;
   is_following: boolean;
@@ -111,6 +117,14 @@ function mapProfile(row: ProfileRow) {
     displayName: row.display_name,
     bio: row.bio,
     avatarUrl: row.avatar_url,
+    profileVisibility: row.profile_visibility,
+    postsVisibility: row.posts_visibility,
+    messageVisibility: row.message_visibility,
+    privacy: {
+      viewProfile: row.profile_visibility === 'public',
+      viewPosts: row.posts_visibility === 'public',
+      message: row.message_visibility === 'public'
+    },
     followersCount: Number(row.followers_count ?? 0),
     followingCount: Number(row.following_count ?? 0),
     isFollowing: Boolean(row.is_following)
@@ -139,6 +153,9 @@ export class SocialService {
           coalesce(up.display_name, u.username) as display_name,
           coalesce(up.bio, '') as bio,
           avatar.public_url as avatar_url,
+          coalesce(up.profile_visibility, 'public') as profile_visibility,
+          coalesce(up.posts_visibility, 'public') as posts_visibility,
+          coalesce(up.message_visibility, 'public') as message_visibility,
           (
             select count(*)::int
             from follows f
@@ -160,6 +177,19 @@ export class SocialService {
         left join media_assets avatar on avatar.id = up.avatar_media_id
         where u.id = $2
           and u.email_verified_at is not null
+          and (
+            u.id = $1
+            or coalesce(up.profile_visibility, 'public') = 'public'
+            or (
+              coalesce(up.profile_visibility, 'public') = 'followers'
+              and exists(
+                select 1
+                from follows f
+                where f.follower_user_id = $1
+                  and f.followee_user_id = u.id
+              )
+            )
+          )
         limit 1
       `,
       [viewerUserId, targetUserId]
@@ -190,6 +220,19 @@ export class SocialService {
               )
             )
           )
+          and (
+            p.author_user_id = $1
+            or coalesce(up.posts_visibility, 'public') = 'public'
+            or (
+              coalesce(up.posts_visibility, 'public') = 'followers'
+              and exists(
+                select 1
+                from follows f
+                where f.follower_user_id = $1
+                  and f.followee_user_id = p.author_user_id
+              )
+            )
+          )
         `
       : `
           (
@@ -197,6 +240,19 @@ export class SocialService {
             or p.author_user_id = $1
             or (
               p.visibility = 'followers'
+              and exists(
+                select 1
+                from follows f
+                where f.follower_user_id = $1
+                  and f.followee_user_id = p.author_user_id
+              )
+            )
+          )
+          and (
+            p.author_user_id = $1
+            or coalesce(up.posts_visibility, 'public') = 'public'
+            or (
+              coalesce(up.posts_visibility, 'public') = 'followers'
               and exists(
                 select 1
                 from follows f
@@ -594,10 +650,21 @@ export class SocialService {
               when $4::uuid is null then avatar_media_id
               else $4::uuid
             end,
+            profile_visibility = coalesce($5, profile_visibility),
+            posts_visibility = coalesce($6, posts_visibility),
+            message_visibility = coalesce($7, message_visibility),
             updated_at = now()
           where user_id = $1
         `,
-        [userId, nextDisplayName ?? null, nextBio ?? null, input.avatarMediaId ?? null]
+        [
+          userId,
+          nextDisplayName ?? null,
+          nextBio ?? null,
+          input.avatarMediaId ?? null,
+          input.profileVisibility ?? null,
+          input.postsVisibility ?? null,
+          input.messageVisibility ?? null
+        ]
       );
 
       return this.fetchProfile(userId, userId, client);

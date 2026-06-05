@@ -35,6 +35,10 @@ export default function PublicProfileScreen() {
     feedPosts,
     stories,
     getSocialProfile,
+    getConversationSettings,
+    blockUser,
+    unblockUser,
+    reportUser,
     toggleFollow,
     ensureConversationForUser,
     startConversationCall,
@@ -43,6 +47,7 @@ export default function PublicProfileScreen() {
   const [profile, setProfile] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [chatSafety, setChatSafety] = useState({ blockedByMe: false, reportedByMe: false });
   const [storyViewerId, setStoryViewerId] = useState<string | null>(null);
 
   const loadProfile = useCallback(async () => {
@@ -83,7 +88,37 @@ export default function PublicProfileScreen() {
   const isMe = handle === currentUser.handle;
   const tier = profile?.tier || 'Basic';
   const tierCfg = TIER[tier as keyof typeof TIER] ?? TIER.Basic;
-  const canMessage = !isMe;
+  const canMessage =
+    !isMe &&
+    !chatSafety.blockedByMe &&
+    (profile?.messageVisibility === undefined ||
+      profile?.messageVisibility === 'public' ||
+      (profile?.messageVisibility === 'followers' && Boolean(profile?.isFollowing)));
+
+  useEffect(() => {
+    if (!username || isMe) {
+      setChatSafety({ blockedByMe: false, reportedByMe: false });
+      return;
+    }
+
+    let cancelled = false;
+    void getConversationSettings(username)
+      .then((settings) => {
+        if (!cancelled) {
+          setChatSafety({
+            blockedByMe: settings.blockedByMe,
+            reportedByMe: settings.reportedByMe
+          });
+        }
+      })
+      .catch((error) => {
+        console.log('[KrynoProfile] chat safety load failed', safeProfileError(error, 'Unable to load profile safety state.'));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [getConversationSettings, isMe, username]);
 
   const chatUser = useMemo(
     () => ({
@@ -145,6 +180,67 @@ export default function PublicProfileScreen() {
     Alert.alert('No active story', `${displayName} has no active story right now.`);
   }, [displayName, userStories]);
 
+  const openProfileOptions = useCallback(() => {
+    if (isMe) {
+      Alert.alert('Profile options', 'This is your profile. Use the Profile tab to edit settings.');
+      return;
+    }
+
+    const blockLabel = chatSafety.blockedByMe ? 'Unblock User' : 'Block User';
+    Alert.alert('Profile options', displayName, [
+      {
+        text: blockLabel,
+        style: chatSafety.blockedByMe ? 'default' : 'destructive',
+        onPress: () => {
+          const request = chatSafety.blockedByMe ? unblockUser : blockUser;
+          void request(username)
+            .then((settings) => {
+              setChatSafety({
+                blockedByMe: settings.blockedByMe,
+                reportedByMe: settings.reportedByMe
+              });
+              Alert.alert(
+                chatSafety.blockedByMe ? 'User unblocked' : 'User blocked',
+                chatSafety.blockedByMe
+                  ? 'Messages and calls are allowed again.'
+                  : 'Messages and calls are now blocked.'
+              );
+            })
+            .catch((error) => {
+              Alert.alert('Block setting failed', safeProfileError(error, 'Unable to update this block setting.'));
+            });
+        }
+      },
+      {
+        text: chatSafety.reportedByMe ? 'Report Again' : 'Report User',
+        style: 'destructive',
+        onPress: () => {
+          void reportUser(username, {
+            category: 'profile',
+            description: 'Reported from the Kryno public profile menu.'
+          })
+            .then(() => {
+              setChatSafety((current) => ({ ...current, reportedByMe: true }));
+              Alert.alert('Report sent', 'Kryno moderation can review profile/account metadata, not private message plaintext.');
+            })
+            .catch((error) => {
+              Alert.alert('Report failed', safeProfileError(error, 'Unable to send this report right now.'));
+            });
+        }
+      },
+      { text: 'Cancel', style: 'cancel' }
+    ]);
+  }, [
+    blockUser,
+    chatSafety.blockedByMe,
+    chatSafety.reportedByMe,
+    displayName,
+    isMe,
+    reportUser,
+    unblockUser,
+    username
+  ]);
+
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" />
@@ -160,7 +256,7 @@ export default function PublicProfileScreen() {
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.iconButton}
-                onPress={() => Alert.alert('Profile options', 'Report/block controls will be enforced from the moderation backend phase.')}
+                onPress={openProfileOptions}
               >
                 <Ionicons name="ellipsis-horizontal" size={18} color={COLORS.textSub} />
               </TouchableOpacity>

@@ -17,7 +17,10 @@ const mediaUploadFieldsSchema = mediaUploadSchema.omit({ bytesBase64: true });
 const updateProfileSchema = z.object({
   displayName: z.string().trim().min(1).max(80).optional(),
   bio: z.string().trim().max(280).optional(),
-  avatarMediaId: z.uuid().nullable().optional()
+  avatarMediaId: z.uuid().nullable().optional(),
+  profileVisibility: z.enum(['public', 'followers']).optional(),
+  postsVisibility: z.enum(['public', 'followers']).optional(),
+  messageVisibility: z.enum(['public', 'followers', 'none']).optional()
 });
 
 const usernameParamsSchema = z.object({

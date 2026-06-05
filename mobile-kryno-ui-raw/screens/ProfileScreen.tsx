@@ -113,26 +113,34 @@ function PostCard({ post }: { post: typeof PROFILE_POSTS[0] }) {
 }
 
 // ─── MEMBER CARD ───────────────────────────────────────────────────────────────────────────
-function MemberCard({ tier, joinDate }: { tier: TierType; joinDate: string }) {
+function MemberCard({ tier, joinDate, onPress }: { tier: TierType; joinDate: string; onPress: () => void }) {
   const tierCfg = TIER[tier as keyof typeof TIER] ?? TIER.Basic;
   return (
-    <LinearGradient
-      colors={['rgba(99,102,241,0.18)', 'rgba(6,182,212,0.08)', 'rgba(139,92,246,0.12)']}
-      start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-      style={styles.memberCard}
+    <TouchableOpacity
+      activeOpacity={0.9}
+      onPress={onPress}
+      hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+      accessibilityRole="button"
+      accessibilityLabel="Open Kryno membership"
     >
-      <View style={styles.memberCardLeft}>
-        <Text style={styles.memberCardLabel}>Kryno Member</Text>
-        <Text style={styles.memberCardTier}>{tier}</Text>
-        <Text style={styles.memberCardSince}>Since {joinDate}</Text>
-      </View>
-      <View style={styles.memberCardRight}>
-        <LinearGradient colors={tierCfg.colors as any} style={styles.memberCardLogo}>
-          <Text style={styles.memberCardLogoText}>K</Text>
-        </LinearGradient>
-        <Text style={styles.memberCardPrice}>₹200/mo</Text>
-      </View>
-    </LinearGradient>
+      <LinearGradient
+        colors={['rgba(99,102,241,0.18)', 'rgba(6,182,212,0.08)', 'rgba(139,92,246,0.12)']}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+        style={styles.memberCard}
+      >
+        <View style={styles.memberCardLeft}>
+          <Text style={styles.memberCardLabel}>Kryno Member</Text>
+          <Text style={styles.memberCardTier}>{tier}</Text>
+          <Text style={styles.memberCardSince}>Since {joinDate}</Text>
+        </View>
+        <View style={styles.memberCardRight}>
+          <LinearGradient colors={tierCfg.colors as any} style={styles.memberCardLogo}>
+            <Text style={styles.memberCardLogoText}>K</Text>
+          </LinearGradient>
+          <Text style={styles.memberCardPrice}>₹99/mo</Text>
+        </View>
+      </LinearGradient>
+    </TouchableOpacity>
   );
 }
 
@@ -200,7 +208,8 @@ export default function ProfileScreen() {
   const [status, setStatus] = useState<StatusType>((user.status as StatusType) || 'active');
   const [mood, setMood] = useState<MoodType>((user.mood as MoodType) || 'chill');
   const [theme, setTheme] = useState('dark_glass');
-  const [privacy, setPrivacy] = useState({ viewProfile: true, viewPosts: true, message: false });
+  const [privacy, setPrivacy] = useState(user.profilePrivacy ?? { viewProfile: true, viewPosts: true, message: true });
+  const [privacyBusy, setPrivacyBusy] = useState(false);
   const [bioExpanded, setBioExpanded] = useState(false);
   const [mediaBusy, setMediaBusy] = useState(false);
   const [editVisible, setEditVisible] = useState(false);
@@ -231,6 +240,34 @@ export default function ProfileScreen() {
     setEditName(user.name);
     setEditBio(user.bio);
   }, [user.name, user.bio]);
+
+  React.useEffect(() => {
+    setPrivacy(user.profilePrivacy ?? { viewProfile: true, viewPosts: true, message: true });
+  }, [user.profilePrivacy]);
+
+  const savePrivacySetting = useCallback(async (key: 'viewProfile' | 'viewPosts' | 'message') => {
+    if (privacyBusy) {
+      return;
+    }
+
+    const previous = privacy;
+    const next = { ...privacy, [key]: !privacy[key] };
+    setPrivacy(next);
+
+    try {
+      setPrivacyBusy(true);
+      await saveProfile({
+        profileVisibility: next.viewProfile ? 'public' : 'followers',
+        postsVisibility: next.viewPosts ? 'public' : 'followers',
+        messageVisibility: next.message ? 'public' : 'followers'
+      });
+    } catch (error) {
+      setPrivacy(previous);
+      Alert.alert('Privacy not saved', error instanceof Error ? error.message : 'This privacy setting could not be saved.');
+    } finally {
+      setPrivacyBusy(false);
+    }
+  }, [privacy, privacyBusy, saveProfile]);
 
   const openEditProfile = useCallback(() => {
     setEditName(user.name);
@@ -523,11 +560,27 @@ export default function ProfileScreen() {
                 <Text style={styles.followText}>Edit Profile</Text>
               </TouchableOpacity>
             </LinearGradient>
-            <TouchableOpacity style={styles.msgBtn} activeOpacity={0.8} onPress={pickStoryMedia} disabled={mediaBusy}>
+            <TouchableOpacity
+              style={[styles.msgBtn, mediaBusy && styles.actionDisabled]}
+              activeOpacity={0.8}
+              onPress={pickStoryMedia}
+              disabled={mediaBusy}
+              hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+              accessibilityRole="button"
+              accessibilityLabel="Add story"
+            >
               <Ionicons name="add-circle-outline" size={16} color={COLORS.primary} />
               <Text style={styles.msgBtnText}>Story</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.moreBtn} activeOpacity={0.8} onPress={pickPostMedia} disabled={mediaBusy}>
+            <TouchableOpacity
+              style={[styles.moreBtn, mediaBusy && styles.actionDisabled]}
+              activeOpacity={0.8}
+              onPress={pickPostMedia}
+              disabled={mediaBusy}
+              hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+              accessibilityRole="button"
+              accessibilityLabel="Add profile post"
+            >
               <Ionicons name={mediaBusy ? 'cloud-upload-outline' : 'image-outline'} size={17} color={COLORS.textMuted} />
             </TouchableOpacity>
           </View>
@@ -537,7 +590,7 @@ export default function ProfileScreen() {
         <View style={styles.sections}>
 
           {/* Member Identity Card */}
-          <MemberCard tier={user.tier} joinDate={user.joinDate} />
+          <MemberCard tier={user.tier} joinDate={user.joinDate} onPress={() => navigation.navigate('Membership')} />
 
           {/* Stats */}
           <GlassCard style={styles.statsCard}>
@@ -568,7 +621,10 @@ export default function ProfileScreen() {
                     key={s.id}
                     style={styles.storyItem}
                     activeOpacity={0.85}
-                    disabled={mediaBusy}
+                    disabled={s.isAdd && mediaBusy}
+                    hitSlop={{ top: 6, right: 8, bottom: 8, left: 8 }}
+                    accessibilityRole="button"
+                    accessibilityLabel={s.isAdd ? 'Add story' : `Open ${s.label} story`}
                     onPress={() => {
                       if (s.isAdd) {
                         void pickStoryMedia();
@@ -708,19 +764,19 @@ export default function ProfileScreen() {
                 label="View Profile"
                 icon="eye-outline"
                 on={privacy.viewProfile}
-                onToggle={() => setPrivacy(p => ({ ...p, viewProfile: !p.viewProfile }))}
+                onToggle={() => void savePrivacySetting('viewProfile')}
               />
               <PrivacyToggle
                 label="View Posts"
                 icon="images-outline"
                 on={privacy.viewPosts}
-                onToggle={() => setPrivacy(p => ({ ...p, viewPosts: !p.viewPosts }))}
+                onToggle={() => void savePrivacySetting('viewPosts')}
               />
               <PrivacyToggle
                 label="Message Me"
                 icon="chatbubble-outline"
                 on={privacy.message}
-                onToggle={() => setPrivacy(p => ({ ...p, message: !p.message }))}
+                onToggle={() => void savePrivacySetting('message')}
               />
             </View>
           </GlassCard>
@@ -844,9 +900,10 @@ const styles = StyleSheet.create({
   followGrad: { flex: 1, borderRadius: RADIUS.full, shadowColor: '#6366F1', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.4, shadowRadius: 16, elevation: 8 },
   followInner: { paddingVertical: 13, alignItems: 'center' },
   followText: { fontSize: FONTS.base, fontWeight: FONTS.bold, color: COLORS.white, letterSpacing: 0.3 },
-  msgBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 13, paddingHorizontal: 18, borderRadius: RADIUS.full, backgroundColor: COLORS.bgGlass, borderWidth: 1, borderColor: 'rgba(99,102,241,0.35)' },
+  msgBtn: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 13, paddingHorizontal: 18, borderRadius: RADIUS.full, backgroundColor: COLORS.bgGlass, borderWidth: 1, borderColor: 'rgba(99,102,241,0.35)' },
   msgBtnText: { fontSize: FONTS.sm, fontWeight: FONTS.semibold, color: COLORS.primary },
-  moreBtn: { width: 46, height: 46, borderRadius: RADIUS.full, backgroundColor: COLORS.bgGlass, borderWidth: 1, borderColor: COLORS.border, alignItems: 'center', justifyContent: 'center' },
+  moreBtn: { width: 48, height: 48, borderRadius: RADIUS.full, backgroundColor: COLORS.bgGlass, borderWidth: 1, borderColor: COLORS.border, alignItems: 'center', justifyContent: 'center' },
+  actionDisabled: { opacity: 0.68 },
 
   // Sections
   sections: { paddingHorizontal: SPACE.md, gap: 16 },
@@ -877,7 +934,7 @@ const styles = StyleSheet.create({
   storyItem: { alignItems: 'center', gap: 6 },
   storyRing: { width: 66, height: 66, borderRadius: 33, padding: 2.5, alignItems: 'center', justifyContent: 'center' },
   storyInner: { width: 58, height: 58, borderRadius: 29, backgroundColor: COLORS.bgMid, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
-  storyAddBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  storyAddBtn: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
   storyLabel: { fontSize: FONTS.xs, color: COLORS.textSub, fontWeight: FONTS.medium },
 
   // Inner circle

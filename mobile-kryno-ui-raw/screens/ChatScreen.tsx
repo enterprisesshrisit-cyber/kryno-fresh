@@ -99,7 +99,10 @@ const MENU_PRIMARY: MenuItem[] = [
   { id: 'private', icon: '🔒', label: 'Private Chat Mode',  toggle: true },
 ];
 
-const MENU_DESTRUCTIVE: MenuItem[] = [];
+const MENU_DESTRUCTIVE: MenuItem[] = [
+  { id: 'block', icon: '🚫', label: 'Block User', destructive: true },
+  { id: 'report', icon: '⚠️', label: 'Report', destructive: true },
+];
 
 // ─── THEME PICKER SHEET ───────────────────────────────────────────────────────
 function ThemeSheet({
@@ -165,11 +168,15 @@ function ThemeSheet({
 function MenuPopup({
   visible,
   toggleStates,
+  blockedByMe,
+  reportedByMe,
   onAction,
   onClose,
 }: {
   visible: boolean;
   toggleStates: Record<string, boolean>;
+  blockedByMe: boolean;
+  reportedByMe: boolean;
   onAction: (id: string) => void;
   onClose: () => void;
 }) {
@@ -233,15 +240,23 @@ function MenuPopup({
           {MENU_DESTRUCTIVE.length > 0 && (
             <>
               <View style={styles.popupSectionDivider} />
-              {MENU_DESTRUCTIVE.map((item, idx) => (
-                <MenuRow
-                  key={item.id}
-                  item={item}
-                  isOn={false}
-                  onPress={() => onAction(item.id)}
-                  showDivider={idx < MENU_DESTRUCTIVE.length - 1}
-                />
-              ))}
+              {MENU_DESTRUCTIVE.map((item, idx) => {
+                const displayItem =
+                  item.id === 'block' && blockedByMe
+                    ? { ...item, label: 'Unblock User', destructive: false }
+                    : item.id === 'report' && reportedByMe
+                      ? { ...item, label: 'Report Again' }
+                      : item;
+                return (
+                  <MenuRow
+                    key={item.id}
+                    item={displayItem}
+                    isOn={item.id === 'block' ? blockedByMe : item.id === 'report' ? reportedByMe : false}
+                    onPress={() => onAction(item.id)}
+                    showDivider={idx < MENU_DESTRUCTIVE.length - 1}
+                  />
+                );
+              })}
             </>
           )}
         </LinearGradient>
@@ -677,7 +692,18 @@ function TypingIndicator() {
 // ─── MAIN SCREEN ──────────────────────────────────────────────────────────────
 export default function ChatScreen({ route, navigation }: any) {
   const insets = useSafeAreaInsets();
-  const { getConversationMessages, sendConversationMessage, sendConversationAttachment, markConversationRead, startConversationCall } = useKrynoBackend();
+  const {
+    getConversationMessages,
+    getConversationSettings,
+    updateConversationSettings,
+    blockUser,
+    unblockUser,
+    reportUser,
+    sendConversationMessage,
+    sendConversationAttachment,
+    markConversationRead,
+    startConversationCall
+  } = useKrynoBackend();
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const recorderState = useAudioRecorderState(audioRecorder);
   const convo = route?.params?.conversation || {
@@ -696,6 +722,7 @@ export default function ChatScreen({ route, navigation }: any) {
     convo.user?.handle?.replace(/^@/, '') ||
     convo.user?.name?.toLowerCase().replace(/\s+/g, '.') ||
     'kryno';
+  const recipientLookup = convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey;
   const liveMessages = getConversationMessages(conversationKey);
   const bottomInputInset = Math.max(insets.bottom, Platform.OS === 'android' ? 34 : 10);
 
@@ -710,6 +737,53 @@ export default function ChatScreen({ route, navigation }: any) {
   const [toggleStates,   setToggleStates]   = useState<Record<string, boolean>>({
     focus: false, mute: false, private: false,
   });
+  const [chatSafety, setChatSafety] = useState({
+    blockedByMe: false,
+    reportedByMe: false,
+  });
+
+  const applyConversationSettings = useCallback((settings: {
+    themeId: string;
+    muted: boolean;
+    focusMode: boolean;
+    privateMode: boolean;
+    blockedByMe: boolean;
+    reportedByMe: boolean;
+  }) => {
+    setToggleStates({
+      focus: settings.focusMode,
+      mute: settings.muted,
+      private: settings.privateMode
+    });
+    setChatSafety({
+      blockedByMe: settings.blockedByMe,
+      reportedByMe: settings.reportedByMe
+    });
+    if (CHAT_THEMES.some((theme) => theme.id === settings.themeId)) {
+      setChatTheme(settings.themeId as ChatThemeType);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getConversationSettings(recipientLookup)
+      .then((settings) => {
+        if (cancelled) {
+          return;
+        }
+        applyConversationSettings(settings);
+      })
+      .catch((error) => {
+        console.log('[KrynoChat] settings load failed', {
+          conversationKey,
+          message: safeComposerError(error, 'Unable to load chat settings.')
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyConversationSettings, conversationKey, getConversationSettings, recipientLookup]);
 
   const flatRef = useRef<FlatList>(null);
   const tierCfg = TIER[convo.user.tier as keyof typeof TIER] || TIER['Inner Circle'];
@@ -723,44 +797,160 @@ export default function ChatScreen({ route, navigation }: any) {
     markConversationRead(conversationKey);
   }, [conversationKey, markConversationRead]);
 
-  // Handle menu actions
+  const saveToggleSetting = useCallback((
+    toggleId: 'focus' | 'mute' | 'private',
+    backendKey: 'focusMode' | 'muted' | 'privateMode'
+  ) => {
+    const nextValue = !toggleStates[toggleId];
+    setToggleStates((current) => ({ ...current, [toggleId]: nextValue }));
+    void updateConversationSettings(recipientLookup, { [backendKey]: nextValue })
+      .then(applyConversationSettings)
+      .catch((error) => {
+        setToggleStates((current) => ({ ...current, [toggleId]: !nextValue }));
+        Alert.alert('Setting not saved', safeComposerError(error, 'Unable to save this chat setting right now.'));
+      });
+  }, [applyConversationSettings, recipientLookup, toggleStates, updateConversationSettings]);
+
+  const handleThemeSelect = useCallback((theme: ChatThemeType) => {
+    const previousTheme = chatTheme;
+    setChatTheme(theme);
+    void updateConversationSettings(recipientLookup, { themeId: theme })
+      .then(applyConversationSettings)
+      .catch((error) => {
+        setChatTheme(previousTheme);
+        Alert.alert('Theme not saved', safeComposerError(error, 'Unable to save this chat theme right now.'));
+      });
+  }, [applyConversationSettings, chatTheme, recipientLookup, updateConversationSettings]);
+
   const handleMenuAction = useCallback((id: string) => {
     if (id === 'theme') {
       setShowMenu(false);
       setTimeout(() => setShowThemeSheet(true), 220);
       return;
     }
-    if (['focus', 'mute', 'private'].includes(id)) {
-      setToggleStates(prev => ({ ...prev, [id]: !prev[id] }));
+
+    if (id === 'focus') {
+      setShowMenu(false);
+      saveToggleSetting('focus', 'focusMode');
       return;
     }
+
+    if (id === 'mute') {
+      setShowMenu(false);
+      saveToggleSetting('mute', 'muted');
+      return;
+    }
+
+    if (id === 'private') {
+      setShowMenu(false);
+      saveToggleSetting('private', 'privateMode');
+      return;
+    }
+
+    if (id === 'block') {
+      setShowMenu(false);
+      const action = chatSafety.blockedByMe ? 'Unblock' : 'Block';
+      Alert.alert(
+        `${action} ${convo.user.name}?`,
+        chatSafety.blockedByMe
+          ? 'This will allow messages and calls from this user again.'
+          : 'This will stop messages and calls between you and this user.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: action,
+            style: chatSafety.blockedByMe ? 'default' : 'destructive',
+            onPress: () => {
+              const request = chatSafety.blockedByMe ? unblockUser : blockUser;
+              void request(recipientLookup)
+                .then((settings) => {
+                  applyConversationSettings(settings);
+                  Alert.alert(
+                    chatSafety.blockedByMe ? 'User unblocked' : 'User blocked',
+                    chatSafety.blockedByMe
+                      ? 'Messages and calls are allowed again.'
+                      : 'Messages and calls are now blocked.'
+                  );
+                })
+                .catch((error) => {
+                  Alert.alert('Block setting failed', safeComposerError(error, 'Unable to update this block setting.'));
+                });
+            }
+          }
+        ]
+      );
+      return;
+    }
+
+    if (id === 'report') {
+      setShowMenu(false);
+      Alert.alert(
+        'Report user?',
+        chatSafety.reportedByMe
+          ? 'You already have an open report for this user. Send another report only if there is new abuse.'
+          : 'This sends a moderation report without exposing your encrypted chat messages.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Report',
+            style: 'destructive',
+            onPress: () => {
+              void reportUser(recipientLookup, {
+                category: 'chat',
+                description: 'Reported from the Kryno chat menu.'
+              })
+                .then(() => {
+                  setChatSafety((current) => ({ ...current, reportedByMe: true }));
+                  Alert.alert('Report sent', 'Thanks. Kryno moderation can review account metadata, not your private message plaintext.');
+                })
+                .catch((error) => {
+                  Alert.alert('Report failed', safeComposerError(error, 'Unable to send this report right now.'));
+                });
+            }
+          }
+        ]
+      );
+      return;
+    }
+
     setShowMenu(false);
-  }, []);
+  }, [
+    applyConversationSettings,
+    blockUser,
+    chatSafety.blockedByMe,
+    chatSafety.reportedByMe,
+    convo.user.name,
+    recipientLookup,
+    reportUser,
+    saveToggleSetting,
+    unblockUser
+  ]);
 
   const sendMessage = async () => {
     if (!input.trim()) return;
+    if (chatSafety.blockedByMe) {
+      Alert.alert('Blocked user', 'Unblock this user before sending messages.');
+      return;
+    }
 
     const nextText = input.trim();
     setInput('');
     setTyping(false);
 
-    try {
-      await sendConversationMessage(
-        {
-          conversationKey,
-          recipientLookup: convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey,
-          user: convo.user
-        },
-        nextText
-      );
-      setTimeout(() => flatRef.current?.scrollToEnd({ animated: true }), 80);
-    } catch (error) {
-      setInput(nextText);
-      Alert.alert(
-        'Message failed',
-        safeComposerError(error, 'Unable to send this message right now.')
-      );
-    }
+    void sendConversationMessage(
+      {
+        conversationKey,
+        recipientLookup,
+        user: convo.user
+      },
+      nextText
+    ).catch((error) => {
+      console.log('[KrynoChat] background send failed', {
+        conversationKey,
+        message: safeComposerError(error, 'Unable to send this message right now.')
+      });
+    });
+    setTimeout(() => flatRef.current?.scrollToEnd({ animated: true }), 40);
   };
 
   const ensureCallPermissions = useCallback(async (mode: 'audio' | 'video') => {
@@ -790,13 +980,17 @@ export default function ChatScreen({ route, navigation }: any) {
 
   const startVoiceCall = async () => {
     try {
+      if (chatSafety.blockedByMe) {
+        Alert.alert('Blocked user', 'Unblock this user before starting a call.');
+        return;
+      }
       if (!(await ensureCallPermissions('audio'))) {
         return;
       }
       await startConversationCall(
         {
           conversationKey,
-          recipientLookup: convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey,
+          recipientLookup,
           user: convo.user
         },
         'audio'
@@ -811,13 +1005,17 @@ export default function ChatScreen({ route, navigation }: any) {
 
   const startVideoCall = async () => {
     try {
+      if (chatSafety.blockedByMe) {
+        Alert.alert('Blocked user', 'Unblock this user before starting a video call.');
+        return;
+      }
       if (!(await ensureCallPermissions('video'))) {
         return;
       }
       await startConversationCall(
         {
           conversationKey,
-          recipientLookup: convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey,
+          recipientLookup,
           user: convo.user
         },
         'video'
@@ -832,6 +1030,10 @@ export default function ChatScreen({ route, navigation }: any) {
 
   const pickChatMedia = useCallback(async () => {
     if (composerBusy) return;
+    if (chatSafety.blockedByMe) {
+      Alert.alert('Blocked user', 'Unblock this user before sending media.');
+      return;
+    }
     setComposerBusy(true);
     try {
       const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -856,7 +1058,7 @@ export default function ChatScreen({ route, navigation }: any) {
       await sendConversationAttachment(
         {
           conversationKey,
-          recipientLookup: convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey,
+          recipientLookup,
           user: convo.user
         },
         {
@@ -871,10 +1073,14 @@ export default function ChatScreen({ route, navigation }: any) {
     } finally {
       setComposerBusy(false);
     }
-  }, [composerBusy, conversationKey, convo, sendConversationAttachment]);
+  }, [chatSafety.blockedByMe, composerBusy, conversationKey, convo, recipientLookup, sendConversationAttachment]);
 
   const toggleVoiceNote = useCallback(async () => {
     if (composerBusy) return;
+    if (chatSafety.blockedByMe) {
+      Alert.alert('Blocked user', 'Unblock this user before sending voice messages.');
+      return;
+    }
 
     if (recorderState.isRecording) {
       setComposerBusy(true);
@@ -889,7 +1095,7 @@ export default function ChatScreen({ route, navigation }: any) {
         await sendConversationAttachment(
           {
             conversationKey,
-            recipientLookup: convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey,
+            recipientLookup,
             user: convo.user
           },
           {
@@ -924,7 +1130,7 @@ export default function ChatScreen({ route, navigation }: any) {
     } finally {
       setComposerBusy(false);
     }
-  }, [audioRecorder, composerBusy, conversationKey, convo, recorderState.durationMillis, recorderState.isRecording, sendConversationAttachment]);
+  }, [audioRecorder, chatSafety.blockedByMe, composerBusy, conversationKey, convo, recipientLookup, recorderState.durationMillis, recorderState.isRecording, sendConversationAttachment]);
 
   const addReaction = (msgId: string, reaction: string) => {
     setMessages(prev => prev.map(m =>
@@ -985,7 +1191,7 @@ export default function ChatScreen({ route, navigation }: any) {
         {/* ── MESSAGES ── */}
         <KeyboardAvoidingView
           style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           keyboardVerticalOffset={0}
         >
           <FlatList
@@ -994,6 +1200,7 @@ export default function ChatScreen({ route, navigation }: any) {
             keyExtractor={item => item.id}
             renderItem={({ item }) => <MessageBubble msg={item} onReact={addReaction} />}
             contentContainerStyle={styles.messagesList}
+            keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
             onContentSizeChange={() => flatRef.current?.scrollToEnd({ animated: true })}
             ListFooterComponent={typing ? <TypingIndicator /> : null}
@@ -1124,6 +1331,8 @@ export default function ChatScreen({ route, navigation }: any) {
       <MenuPopup
         visible={showMenu}
         toggleStates={toggleStates}
+        blockedByMe={chatSafety.blockedByMe}
+        reportedByMe={chatSafety.reportedByMe}
         onAction={handleMenuAction}
         onClose={() => setShowMenu(false)}
       />
@@ -1132,7 +1341,7 @@ export default function ChatScreen({ route, navigation }: any) {
       <ThemeSheet
         visible={showThemeSheet}
         current={chatTheme}
-        onSelect={setChatTheme}
+        onSelect={handleThemeSelect}
         onClose={() => setShowThemeSheet(false)}
       />
     </View>
