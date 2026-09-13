@@ -19,6 +19,7 @@ import { messagesRoutes } from './routes/messages.routes.js';
 import { relayRoutes } from './routes/relay.routes.js';
 import { socialRoutes } from './routes/social.routes.js';
 import { usersRoutes } from './routes/users.routes.js';
+import { registerHealthRoutes } from './routes/health.routes.js';
 import { AppError } from './utils/errors.js';
 import { env } from './config/env.js';
 import { isAllowedCorsOrigin } from './utils/security.js';
@@ -112,39 +113,12 @@ export async function buildApp() {
     await closeRateLimitRedisClient();
   });
 
-  app.get('/api/health', async () => ({
-    ok: true,
-    service: 'kryno-api',
-    environment: env.APP_ENV
-  }));
-
-  app.get('/api/ready', async (_request, reply) => {
-    const startedAt = Date.now();
-
-    try {
+  registerHealthRoutes(app, {
+    environment: env.APP_ENV,
+    database: async () => {
       await pool.query('select 1');
-      return reply.code(200).send({
-        ok: true,
-        service: 'kryno-api',
-        checks: {
-          database: 'ok'
-        },
-        latencyMs: Date.now() - startedAt
-      });
-    } catch (error) {
-      captureException(error, {
-        route: '/api/ready',
-        check: 'database'
-      });
-
-      return reply.code(503).send({
-        ok: false,
-        service: 'kryno-api',
-        checks: {
-          database: 'failed'
-        }
-      });
-    }
+    },
+    redis: rateLimitRedis ? () => rateLimitRedis.ping() : undefined
   });
 
   await app.register(async (instance) => {
