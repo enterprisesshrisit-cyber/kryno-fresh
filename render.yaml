@@ -6,7 +6,7 @@ services:
     plan: free
     region: singapore
     buildCommand: npm ci --include=dev && npm run build
-    startCommand: npm run start
+    startCommand: npm run db:migrate:dist && npm run start
     healthCheckPath: /api/health
     autoDeploy: false
     envVars:

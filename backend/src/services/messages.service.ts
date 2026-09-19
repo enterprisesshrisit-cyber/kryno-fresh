@@ -52,6 +52,7 @@ type UpdateConversationSettingsInput = {
   currentUserId: string;
   peerLookup: string;
   themeId?: string;
+  vibeId?: string;
   muted?: boolean;
   focusMode?: boolean;
   privateMode?: boolean;
@@ -154,6 +155,7 @@ export class MessagesService {
 
     const result = await pool.query<{
       theme_id: string;
+      vibe_id: string;
       muted: boolean;
       focus_mode: boolean;
       private_mode: boolean;
@@ -163,6 +165,7 @@ export class MessagesService {
       `
         select
           coalesce(dcs.theme_id, 'dark_glass') as theme_id,
+          coalesce(dcs.vibe_id, 'silent') as vibe_id,
           coalesce(dcs.muted, false) as muted,
           coalesce(dcs.focus_mode, false) as focus_mode,
           coalesce(dcs.private_mode, false) as private_mode,
@@ -189,6 +192,7 @@ export class MessagesService {
       peerUserId: peer.id,
       peerUsername: peer.username,
       themeId: row?.theme_id ?? 'dark_glass',
+      vibeId: row?.vibe_id ?? 'silent',
       muted: Boolean(row?.muted),
       focusMode: Boolean(row?.focus_mode),
       privateMode: Boolean(row?.private_mode),
@@ -209,23 +213,26 @@ export class MessagesService {
           user_id,
           peer_user_id,
           theme_id,
+          vibe_id,
           muted,
           focus_mode,
           private_mode,
           updated_at
         )
-        values ($1, $2, coalesce($3, 'dark_glass'), coalesce($4, false), coalesce($5, false), coalesce($6, false), now())
+        values ($1, $2, coalesce($3, 'dark_glass'), coalesce($4, 'silent'), coalesce($5, false), coalesce($6, false), coalesce($7, false), now())
         on conflict (user_id, peer_user_id) do update set
           theme_id = coalesce($3, direct_conversation_settings.theme_id),
-          muted = coalesce($4, direct_conversation_settings.muted),
-          focus_mode = coalesce($5, direct_conversation_settings.focus_mode),
-          private_mode = coalesce($6, direct_conversation_settings.private_mode),
+          vibe_id = coalesce($4, direct_conversation_settings.vibe_id),
+          muted = coalesce($5, direct_conversation_settings.muted),
+          focus_mode = coalesce($6, direct_conversation_settings.focus_mode),
+          private_mode = coalesce($7, direct_conversation_settings.private_mode),
           updated_at = now()
       `,
       [
         input.currentUserId,
         peer.id,
         input.themeId ?? null,
+        input.vibeId ?? null,
         input.muted ?? null,
         input.focusMode ?? null,
         input.privateMode ?? null
@@ -305,7 +312,7 @@ export class MessagesService {
   }
 
   async sendMessage(input: SendMessageInput) {
-    return withTransaction(async (client) => {
+    const persisted = await withTransaction(async (client) => {
       const recipientResult = await client.query<{
         id: string;
       }>(
@@ -340,6 +347,7 @@ export class MessagesService {
 
       await this.assertNotBlocked(input.senderUserId, recipient.id);
 
+      let targetDeviceSessionIds: string[];
       if (input.recipientDeviceSessionId) {
         const deviceResult = await client.query<{ id: string; user_id: string; trusted: boolean }>(
           `
@@ -356,51 +364,32 @@ export class MessagesService {
         if (!recipientDevice || recipientDevice.user_id !== recipient.id || !recipientDevice.trusted) {
           throw new AppError(400, 'Recipient device session is invalid.', 'INVALID_RECIPIENT_DEVICE');
         }
+
+        targetDeviceSessionIds = [recipientDevice.id];
+      } else {
+        const deviceResult = await client.query<{ id: string }>(
+          `
+            select id
+            from device_sessions
+            where user_id = $1
+              and trusted = true
+            order by created_at asc
+          `,
+          [recipient.id]
+        );
+        targetDeviceSessionIds = deviceResult.rows.map((row) => row.id);
+      }
+
+      if (targetDeviceSessionIds.length === 0) {
+        throw new AppError(
+          409,
+          'Recipient does not have an available trusted device.',
+          'RECIPIENT_DEVICE_UNAVAILABLE'
+        );
       }
 
       const ttlHours = Math.min(Math.max(input.ttlHours ?? DEFAULT_QUEUE_TTL_HOURS, 1), MAX_TTL_HOURS);
       const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
-      const serverReceivedAt = new Date().toISOString();
-
-      const relayResult = relayService.deliverDirectMessage({
-        recipientUserId: recipient.id,
-        recipientDeviceSessionId: input.recipientDeviceSessionId ?? null,
-        payload: {
-          messageId: input.messageId,
-          senderUserId: input.senderUserId,
-          senderDeviceSessionId: input.senderSessionId,
-          recipientDeviceSessionId: input.recipientDeviceSessionId ?? null,
-          messageType: input.messageType,
-          ciphertext: input.ciphertext,
-          encryptedContentType: input.encryptedContentType,
-          clientCreatedAt: input.clientCreatedAt,
-          serverReceivedAt,
-          expiresAt: null
-        }
-      });
-
-      if (relayResult.delivered) {
-        const notificationPrefs = await this.getRecipientNotificationPrefs(recipient.id, input.senderUserId);
-        const pushResult = notificationPrefs.muted || notificationPrefs.focusMode
-          ? { attempted: 0, sent: 0, muted: true }
-          : await trySendMessagePush(
-              recipient.id,
-              senderUsername,
-              relayResult.deliveredSessionIds,
-              notificationPrefs.privateMode
-            );
-
-        return {
-          messageId: input.messageId,
-          recipientUserId: recipient.id,
-          recipientDeviceSessionId: relayResult.deliveredSessionIds[0] ?? input.recipientDeviceSessionId ?? null,
-          serverReceivedAt,
-          expiresAt: null,
-          deliveryMode: 'live',
-          pushNotification: pushResult
-        };
-      }
-
       await client.query(
         `
           insert into direct_messages (
@@ -435,13 +424,20 @@ export class MessagesService {
 
       const inserted = await client.query<{
         message_id: string;
+        sender_user_id: string;
         recipient_user_id: string;
         recipient_device_session_id: string | null;
         server_received_at: string;
         expires_at: string;
       }>(
         `
-          select message_id, recipient_user_id, recipient_device_session_id, server_received_at, expires_at
+          select
+            message_id,
+            sender_user_id,
+            recipient_user_id,
+            recipient_device_session_id,
+            server_received_at,
+            expires_at
           from direct_messages
           where message_id = $1::uuid
           limit 1
@@ -450,10 +446,18 @@ export class MessagesService {
       );
 
       const row = inserted.rows[0];
-      const notificationPrefs = await this.getRecipientNotificationPrefs(row.recipient_user_id, input.senderUserId);
-      const pushResult = notificationPrefs.muted || notificationPrefs.focusMode
-        ? { attempted: 0, sent: 0, muted: true }
-        : await trySendMessagePush(row.recipient_user_id, senderUsername, undefined, notificationPrefs.privateMode);
+      if (!row || row.sender_user_id !== input.senderUserId || row.recipient_user_id !== recipient.id) {
+        throw new AppError(409, 'Message identifier is already in use.', 'MESSAGE_ID_CONFLICT');
+      }
+
+      await client.query(
+        `
+          insert into direct_message_deliveries (message_id, device_session_id)
+          select $1::uuid, unnest($2::uuid[])
+          on conflict (message_id, device_session_id) do nothing
+        `,
+        [input.messageId, targetDeviceSessionIds]
+      );
 
       return {
         messageId: row.message_id,
@@ -461,14 +465,61 @@ export class MessagesService {
         recipientDeviceSessionId: row.recipient_device_session_id,
         serverReceivedAt: row.server_received_at,
         expiresAt: row.expires_at,
-        deliveryMode: 'queued',
-        pushNotification: pushResult
+        senderUsername
       };
     });
+
+    // Delivery happens only after the transaction commits, so a successful
+    // realtime send can never bypass durable ciphertext storage.
+    const relayResult = relayService.deliverDirectMessage({
+      recipientUserId: persisted.recipientUserId,
+      recipientDeviceSessionId: input.recipientDeviceSessionId ?? null,
+      payload: {
+        messageId: persisted.messageId,
+        senderUserId: input.senderUserId,
+        senderDeviceSessionId: input.senderSessionId,
+        recipientDeviceSessionId: input.recipientDeviceSessionId ?? null,
+        messageType: input.messageType,
+        ciphertext: input.ciphertext,
+        encryptedContentType: input.encryptedContentType,
+        clientCreatedAt: input.clientCreatedAt,
+        serverReceivedAt: persisted.serverReceivedAt,
+        expiresAt: persisted.expiresAt
+      }
+    });
+
+    const notificationPrefs = await this.getRecipientNotificationPrefs(
+      persisted.recipientUserId,
+      input.senderUserId
+    );
+    const pushResult = notificationPrefs.muted || notificationPrefs.focusMode
+      ? { attempted: 0, sent: 0, muted: true }
+      : await trySendMessagePush(
+          persisted.recipientUserId,
+          persisted.senderUsername,
+          relayResult.deliveredSessionIds,
+          notificationPrefs.privateMode
+        );
+
+    return {
+      messageId: persisted.messageId,
+      recipientUserId: persisted.recipientUserId,
+      recipientDeviceSessionId:
+        relayResult.deliveredSessionIds[0] ?? persisted.recipientDeviceSessionId,
+      serverReceivedAt: persisted.serverReceivedAt,
+      expiresAt: persisted.expiresAt,
+      deliveryMode: relayResult.delivered ? 'live' : 'queued',
+      pushNotification: pushResult
+    };
   }
 
   async fetchInbox(currentUserId: string, sessionId: string, limit = 50) {
     const safeLimit = Math.min(Math.max(limit, 1), 200);
+
+    await pool.query(
+      `delete from direct_messages where recipient_user_id = $1 and expires_at <= now()`,
+      [currentUserId]
+    );
 
     const result = await pool.query<{
       message_id: string;
@@ -484,21 +535,23 @@ export class MessagesService {
     }>(
       `
         select
-          message_id,
-          sender_user_id,
-          sender_device_session_id,
-          recipient_device_session_id,
-          message_type,
-          ciphertext,
-          encrypted_content_type,
-          client_created_at,
-          server_received_at,
-          expires_at
-        from direct_messages
-        where recipient_user_id = $1
-          and expires_at > now()
-          and (recipient_device_session_id is null or recipient_device_session_id = $2)
-        order by server_received_at asc
+          dm.message_id,
+          dm.sender_user_id,
+          dm.sender_device_session_id,
+          dmd.device_session_id as recipient_device_session_id,
+          dm.message_type,
+          dm.ciphertext,
+          dm.encrypted_content_type,
+          dm.client_created_at,
+          dm.server_received_at,
+          dm.expires_at
+        from direct_message_deliveries dmd
+        join direct_messages dm on dm.message_id = dmd.message_id
+        where dm.recipient_user_id = $1
+          and dm.expires_at > now()
+          and dmd.device_session_id = $2
+          and dmd.acked_at is null
+        order by dm.server_received_at asc
         limit $3
       `,
       [currentUserId, sessionId, safeLimit]
@@ -522,24 +575,47 @@ export class MessagesService {
 
   async acknowledgeMessages(input: AckMessageInput) {
     if (input.messageIds.length === 0) {
-      return { deletedCount: 0 };
+      return { acknowledgedCount: 0, deletedCount: 0, deletedMessageIds: [] as string[] };
     }
 
-    const result = await pool.query<{ message_id: string }>(
-      `
-        delete from direct_messages
-        where recipient_user_id = $1
-          and (recipient_device_session_id is null or recipient_device_session_id = $2)
-          and message_id = any($3::uuid[])
-        returning message_id
-      `,
-      [input.currentUserId, input.recipientSessionId, input.messageIds]
-    );
+    return withTransaction(async (client) => {
+      const acknowledged = await client.query<{ message_id: string }>(
+        `
+          update direct_message_deliveries dmd
+          set acked_at = coalesce(dmd.acked_at, now())
+          from direct_messages dm
+          where dm.message_id = dmd.message_id
+            and dm.recipient_user_id = $1
+            and dmd.device_session_id = $2
+            and dmd.message_id = any($3::uuid[])
+            and dmd.acked_at is null
+          returning dmd.message_id
+        `,
+        [input.currentUserId, input.recipientSessionId, input.messageIds]
+      );
 
-    return {
-      deletedCount: result.rowCount ?? 0,
-      deletedMessageIds: result.rows.map((row) => row.message_id)
-    };
+      const deleted = await client.query<{ message_id: string }>(
+        `
+          delete from direct_messages dm
+          where dm.recipient_user_id = $1
+            and dm.message_id = any($2::uuid[])
+            and not exists (
+              select 1
+              from direct_message_deliveries dmd
+              where dmd.message_id = dm.message_id
+                and dmd.acked_at is null
+            )
+          returning dm.message_id
+        `,
+        [input.currentUserId, input.messageIds]
+      );
+
+      return {
+        acknowledgedCount: acknowledged.rowCount ?? 0,
+        deletedCount: deleted.rowCount ?? 0,
+        deletedMessageIds: deleted.rows.map((row) => row.message_id)
+      };
+    });
   }
 }
 

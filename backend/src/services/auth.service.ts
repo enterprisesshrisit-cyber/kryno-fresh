@@ -1,5 +1,6 @@
 import argon2 from 'argon2';
 import pg from 'pg';
+import { errors as joseErrors } from 'jose';
 import { env } from '../config/env.js';
 import { pool, withTransaction } from '../db/pool.js';
 import { AppError } from '../utils/errors.js';
@@ -463,10 +464,21 @@ export class AuthService {
   }
 
   async refresh(input: RefreshInput, meta: RequestMeta) {
-    const payload = await tokenService.verifyRefreshToken(input.refreshToken);
+    let payload: Awaited<ReturnType<typeof tokenService.verifyRefreshToken>>;
+    try {
+      payload = await tokenService.verifyRefreshToken(input.refreshToken);
+    } catch (error) {
+      if (error instanceof joseErrors.JOSEError) {
+        throw new AppError(401, 'Session expired, please login again.', 'INVALID_REFRESH_TOKEN');
+      }
+      throw error;
+    }
+    if (payload.type !== 'refresh' || payload.did !== input.deviceId) {
+      throw new AppError(401, 'Session expired, please login again.', 'DEVICE_MISMATCH');
+    }
     const refreshHash = sha256(input.refreshToken);
 
-    return withTransaction(async (client) => {
+    const result = await withTransaction(async (client) => {
       const tokenResult = await client.query<{
         id: string;
         user_id: string;
@@ -491,25 +503,32 @@ export class AuthService {
         throw new AppError(401, 'Invalid refresh token.', 'INVALID_REFRESH_TOKEN');
       }
 
+      if (existing.user_id !== payload.sub || existing.device_session_id !== payload.sid ||
+          existing.id !== payload.jti || existing.token_family_id !== payload.family) {
+        throw new AppError(401, 'Session expired, please login again.', 'INVALID_REFRESH_TOKEN');
+      }
+
       if (existing.revoked_at || existing.replaced_by_token_id) {
         await client.query(
           'update refresh_tokens set reuse_detected = true, revoked_at = coalesce(revoked_at, now()) where token_family_id = $1',
           [existing.token_family_id]
         );
-        throw new AppError(401, 'Refresh token reuse detected.', 'REFRESH_REUSE_DETECTED');
+        // Return the error so withTransaction commits the revocation. Throwing
+        // here previously rolled back the very security action we just applied.
+        return { error: new AppError(401, 'Session expired, please login again.', 'REFRESH_REUSE_DETECTED') };
       }
 
       if (new Date(existing.expires_at).getTime() < Date.now()) {
         throw new AppError(401, 'Refresh token expired.', 'REFRESH_EXPIRED');
       }
 
-      const sessionResult = await client.query<{ id: string; device_id: string }>(
-        'select id, device_id from device_sessions where id = $1 and user_id = $2 for update',
+      const sessionResult = await client.query<{ id: string; device_id: string; trusted: boolean }>(
+        'select id, device_id, trusted from device_sessions where id = $1 and user_id = $2 for update',
         [existing.device_session_id, payload.sub]
       );
 
       const session = sessionResult.rows[0];
-      if (!session || session.device_id !== input.deviceId) {
+      if (!session || !session.trusted || session.device_id !== input.deviceId) {
         throw new AppError(401, 'Refresh token does not match this device.', 'DEVICE_MISMATCH');
       }
 
@@ -581,6 +600,8 @@ export class AuthService {
         refreshToken: replacementRefreshToken
       };
     });
+    if ('error' in result) throw result.error;
+    return result;
   }
 
   async logout(input: LogoutInput) {

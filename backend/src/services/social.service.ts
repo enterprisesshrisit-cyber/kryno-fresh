@@ -46,7 +46,7 @@ const ALLOWED_VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/webm', 'video/quic
 type ProfileRow = {
   user_id: string;
   username: string;
-  email: string;
+  email: string | null;
   display_name: string;
   bio: string;
   avatar_url: string | null;
@@ -109,11 +109,11 @@ function inferPostMediaKind(mimeType: string | null) {
   return 'text';
 }
 
-function mapProfile(row: ProfileRow) {
+function mapProfile(row: ProfileRow, includeEmail = false) {
   return {
     userId: row.user_id,
     username: row.username,
-    email: row.email,
+    ...(includeEmail && row.email ? { email: row.email } : {}),
     displayName: row.display_name,
     bio: row.bio,
     avatarUrl: row.avatar_url,
@@ -149,7 +149,7 @@ export class SocialService {
         select
           u.id as user_id,
           u.username,
-          u.email,
+          case when u.id = $1 then u.email else null end as email,
           coalesce(up.display_name, u.username) as display_name,
           coalesce(up.bio, '') as bio,
           avatar.public_url as avatar_url,
@@ -200,7 +200,7 @@ export class SocialService {
       throw new AppError(404, 'User profile not found.', 'PROFILE_NOT_FOUND');
     }
 
-    return mapProfile(row);
+    return mapProfile(row, viewerUserId === targetUserId);
   }
 
   private async fetchPosts(viewerUserId: string, postIds?: string[], limit = 20) {
@@ -233,6 +233,11 @@ export class SocialService {
               )
             )
           )
+          and (
+            p.media_asset_id is null
+            or p.visibility = 'public'
+            or p.author_user_id = $1
+          )
         `
       : `
           (
@@ -260,6 +265,11 @@ export class SocialService {
                   and f.followee_user_id = p.author_user_id
               )
             )
+          )
+          and (
+            p.media_asset_id is null
+            or p.visibility = 'public'
+            or p.author_user_id = $1
           )
         `;
 
@@ -437,15 +447,6 @@ export class SocialService {
           and (
             s.author_user_id = $1
             or s.visibility = 'public'
-            or (
-              s.visibility = 'followers'
-              and exists(
-                select 1
-                from follows f
-                where f.follower_user_id = $1
-                  and f.followee_user_id = s.author_user_id
-              )
-            )
           )
         order by s.created_at desc
         limit $2
@@ -501,10 +502,13 @@ export class SocialService {
           select
             u.id as user_id,
             u.username,
-            u.email,
+            null::text as email,
             coalesce(up.display_name, u.username) as display_name,
             coalesce(up.bio, '') as bio,
             avatar.public_url as avatar_url,
+            coalesce(up.profile_visibility, 'public') as profile_visibility,
+            coalesce(up.posts_visibility, 'public') as posts_visibility,
+            coalesce(up.message_visibility, 'public') as message_visibility,
             (
               select count(*)::int
               from follows f
@@ -728,6 +732,14 @@ export class SocialService {
       throw new AppError(400, 'Post media asset is invalid.', 'INVALID_POST_ASSET');
     }
 
+    if (input.mediaAssetId && input.visibility !== 'public') {
+      throw new AppError(
+        409,
+        'Private post media is temporarily owner-only until encrypted media delivery is enabled.',
+        'PRIVATE_MEDIA_NOT_AVAILABLE'
+      );
+    }
+
     const insertResult = await pool.query<{ id: string }>(
       `
         insert into posts (
@@ -802,14 +814,49 @@ export class SocialService {
 
   async setPostLiked(userId: string, postId: string, liked: boolean) {
     if (liked) {
-      await pool.query(
+      const result = await pool.query(
         `
           insert into post_likes (post_id, user_id)
-          values ($1, $2)
+          select p.id, $2
+          from posts p
+          left join user_profiles up on up.user_id = p.author_user_id
+          where p.id = $1
+            and (
+              p.author_user_id = $2
+              or p.visibility = 'public'
+              or (
+                p.visibility = 'followers'
+                and p.media_asset_id is null
+                and exists(
+                  select 1 from follows f
+                  where f.follower_user_id = $2
+                    and f.followee_user_id = p.author_user_id
+                )
+              )
+            )
+            and (
+              p.author_user_id = $2
+              or coalesce(up.posts_visibility, 'public') = 'public'
+              or (
+                coalesce(up.posts_visibility, 'public') = 'followers'
+                and exists(
+                  select 1 from follows f
+                  where f.follower_user_id = $2
+                    and f.followee_user_id = p.author_user_id
+                )
+              )
+            )
           on conflict do nothing
+          returning post_id
         `,
         [postId, userId]
       );
+      if (!result.rows[0]) {
+        const existing = await this.fetchPosts(userId, [postId]);
+        if (existing.length === 0) {
+          throw new AppError(404, 'Post not found.', 'POST_NOT_FOUND');
+        }
+      }
     } else {
       await pool.query(
         `
@@ -835,13 +882,46 @@ export class SocialService {
       throw new AppError(400, 'Comment cannot be empty.', 'EMPTY_COMMENT');
     }
 
-    await pool.query(
+    const insertResult = await pool.query(
       `
         insert into post_comments (post_id, author_user_id, body)
-        values ($1, $2, $3)
+        select p.id, $2, $3
+        from posts p
+        left join user_profiles up on up.user_id = p.author_user_id
+        where p.id = $1
+          and (
+            p.author_user_id = $2
+            or p.visibility = 'public'
+            or (
+              p.visibility = 'followers'
+              and p.media_asset_id is null
+              and exists(
+                select 1 from follows f
+                where f.follower_user_id = $2
+                  and f.followee_user_id = p.author_user_id
+              )
+            )
+          )
+          and (
+            p.author_user_id = $2
+            or coalesce(up.posts_visibility, 'public') = 'public'
+            or (
+              coalesce(up.posts_visibility, 'public') = 'followers'
+              and exists(
+                select 1 from follows f
+                where f.follower_user_id = $2
+                  and f.followee_user_id = p.author_user_id
+              )
+            )
+          )
+        returning id
       `,
       [postId, userId, trimmed]
     );
+
+    if (!insertResult.rows[0]) {
+      throw new AppError(404, 'Post not found.', 'POST_NOT_FOUND');
+    }
 
     const [post] = await this.fetchPosts(userId, [postId]);
     if (!post) {
@@ -853,6 +933,14 @@ export class SocialService {
 
   async createStory(input: CreateStoryInput) {
     const caption = sanitizePublicText(input.caption, 280);
+    if (input.visibility !== 'public') {
+      throw new AppError(
+        409,
+        'Private stories are temporarily owner-only until encrypted media delivery is enabled.',
+        'PRIVATE_MEDIA_NOT_AVAILABLE'
+      );
+    }
+
     const assetResult = await pool.query<{ id: string }>(
       `
         select id
@@ -893,14 +981,23 @@ export class SocialService {
   }
 
   async markStoryViewed(userId: string, storyId: string) {
-    await pool.query(
+    const insertResult = await pool.query(
       `
         insert into story_views (story_id, viewer_user_id)
-        values ($1, $2)
+        select s.id, $1
+        from stories s
+        where s.id = $2
+          and s.expires_at > now()
+          and (s.author_user_id = $1 or s.visibility = 'public')
         on conflict do nothing
+        returning story_id
       `,
-      [storyId, userId]
+      [userId, storyId]
     );
+
+    if (!insertResult.rows[0]) {
+      throw new AppError(404, 'Story not found.', 'STORY_NOT_FOUND');
+    }
 
     const stories = await this.fetchStories(userId, 20);
     return stories.find((story) => story.id === storyId) ?? null;

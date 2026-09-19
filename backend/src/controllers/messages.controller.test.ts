@@ -23,3 +23,16 @@ test('send message validation rejects extra plaintext fields', () => {
   );
 });
 
+test('send message validation bounds ciphertext payload size', () => {
+  assert.throws(() =>
+    sendMessageSchema.parse({
+      messageId: '11111111-1111-4111-8111-111111111111',
+      recipientLookup: 'recipient_user',
+      recipientDeviceSessionId: '22222222-2222-4222-8222-222222222222',
+      messageType: 'text',
+      ciphertext: 'x'.repeat(262_145),
+      encryptedContentType: 'signal',
+      clientCreatedAt: new Date().toISOString()
+    })
+  );
+});

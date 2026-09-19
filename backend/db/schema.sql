@@ -31,6 +31,14 @@ create table if not exists device_sessions (
   unique (user_id, device_id)
 );
 
+-- CREATE TABLE IF NOT EXISTS does not add columns to an older installation.
+-- Keep the development bootstrap safe for databases created before push support.
+alter table device_sessions
+  add column if not exists push_provider varchar(24),
+  add column if not exists push_token text,
+  add column if not exists push_platform varchar(16),
+  add column if not exists push_token_updated_at timestamptz;
+
 create table if not exists refresh_tokens (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references users(id) on delete cascade,
@@ -124,6 +132,18 @@ create table if not exists direct_messages (
 create index if not exists direct_messages_recipient_idx on direct_messages(recipient_user_id, server_received_at);
 create index if not exists direct_messages_expiry_idx on direct_messages(expires_at);
 
+create table if not exists direct_message_deliveries (
+  message_id uuid not null references direct_messages(message_id) on delete cascade,
+  device_session_id uuid not null references device_sessions(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  acked_at timestamptz,
+  primary key (message_id, device_session_id)
+);
+
+create index if not exists direct_message_deliveries_pending_idx
+  on direct_message_deliveries(device_session_id, created_at)
+  where acked_at is null;
+
 create table if not exists direct_attachments (
   id uuid primary key default gen_random_uuid(),
   sender_user_id uuid not null references users(id) on delete cascade,
@@ -191,6 +211,7 @@ create table if not exists direct_conversation_settings (
   user_id uuid not null references users(id) on delete cascade,
   peer_user_id uuid not null references users(id) on delete cascade,
   theme_id varchar(48) not null default 'dark_glass',
+  vibe_id varchar(48) not null default 'silent',
   muted boolean not null default false,
   focus_mode boolean not null default false,
   private_mode boolean not null default false,

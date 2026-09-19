@@ -165,8 +165,14 @@ export class IndexedDbSignalStore implements StorageType {
     await db.put('kv', value, this.key('registrationId'));
   }
 
-  async isTrustedIdentity(_identifier: string, _identityKey: ArrayBuffer, _direction: Direction) {
-    return true;
+  async isTrustedIdentity(identifier: string, identityKey: ArrayBuffer, _direction: Direction) {
+    const db = await this.getDb();
+    const storedIdentity = (await db.get('kv', this.key(`identity:${identifier}`))) as string | undefined;
+    if (!storedIdentity) {
+      return true;
+    }
+
+    return storedIdentity === toBase64(identityKey);
   }
 
   async saveIdentity(encodedAddress: string, publicKey: ArrayBuffer) {

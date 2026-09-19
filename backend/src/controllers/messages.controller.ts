@@ -9,7 +9,7 @@ export const sendMessageSchema = z
     recipientLookup: z.string().min(3).max(128),
     recipientDeviceSessionId: z.uuid().optional(),
     messageType: z.string().min(1).max(32),
-    ciphertext: z.string().min(16),
+    ciphertext: z.string().min(16).max(262_144),
     encryptedContentType: z.string().min(1).max(32).default('signal'),
     clientCreatedAt: z.iso.datetime(),
     ttlHours: z.number().int().positive().max(24 * 365).optional()
@@ -39,6 +39,7 @@ const peerParamsSchema = z.object({
 
 const updateConversationSettingsSchema = z.object({
   themeId: z.string().trim().min(1).max(48).optional(),
+  vibeId: z.string().trim().min(1).max(48).optional(),
   muted: z.boolean().optional(),
   focusMode: z.boolean().optional(),
   privateMode: z.boolean().optional()
