@@ -15,7 +15,7 @@ test('liveness succeeds during Redis outage but normal routes stay rate-limited'
   registerHealthRoutes(app, {
     environment: 'production',
     async database() { throw new Error('must not be called by liveness'); },
-    async redis() { throw new Error('unavailble'); }
+    async redis() { throw new Error('unavailable'); }
   });
   app.get('/protected-fixture', async () => ({ success: true }));
   try {
