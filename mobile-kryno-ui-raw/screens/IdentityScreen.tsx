@@ -80,7 +80,7 @@ export default function IdentityScreen() {
             >
               <View style={styles.premiumBannerLeft}>
                 <Text style={styles.premiumBannerTitle}>Profile Effects</Text>
-                <Text style={styles.premiumBannerSub}>Premium · ₹200/month</Text>
+                <Text style={styles.premiumBannerSub}>Premium · ₹99/month</Text>
               </View>
               <View style={styles.premiumBannerBadge}>
                 <Text style={styles.premiumBannerBadgeText}>✦ Active</Text>
@@ -147,7 +147,7 @@ export default function IdentityScreen() {
               >
                 <View style={styles.upgradeLeft}>
                   <Text style={styles.upgradeTitle}>Unlock All Effects</Text>
-                  <Text style={styles.upgradeSub}>₹200/month · Cancel anytime</Text>
+                  <Text style={styles.upgradeSub}>₹99/month · Cancel anytime</Text>
                 </View>
                 <Ionicons name="arrow-forward-circle" size={28} color="white" />
               </LinearGradient>

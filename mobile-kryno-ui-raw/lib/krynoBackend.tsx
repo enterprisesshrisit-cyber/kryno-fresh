@@ -1,6 +1,14 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Linking } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
+import { createSessionStorage } from './sessionStorage';
+import { SessionLifecycle } from './sessionLifecycle';
+import {
+  isUnrecoverableAuthError,
+  safeUserFacingError,
+  SESSION_EXPIRED_MESSAGE
+} from './sessionErrors';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
   clearKrynoNotifications,
@@ -140,6 +148,7 @@ type ConversationSettings = {
   peerUserId: string;
   peerUsername: string;
   themeId: ChatThemeId;
+  vibeId: ChatVibeId;
   muted: boolean;
   focusMode: boolean;
   privateMode: boolean;
@@ -148,6 +157,7 @@ type ConversationSettings = {
 };
 
 type ChatThemeId = 'dark_glass' | 'breathing_3d' | 'minimal_calm' | 'premium_aura';
+type ChatVibeId = 'silent' | 'lofi_pulse' | 'rain_room' | 'neon_night';
 
 type SearchUser = {
   id: string;
@@ -232,6 +242,37 @@ type CallStateModel = {
   startedAt: string;
   connectedAt?: string;
 };
+
+type IncomingCallLink = {
+  callId: string;
+  mode: MobileCallMode;
+  callerUsername: string;
+};
+
+const CALL_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function parseIncomingCallLink(url: string): IncomingCallLink | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'kryno:' || parsed.hostname !== 'call' || parsed.pathname !== '/incoming') {
+      return null;
+    }
+
+    const callId = parsed.searchParams.get('callId')?.trim() ?? '';
+    const callerUsername = parsed.searchParams.get('caller')?.trim() ?? '';
+    if (!CALL_ID_PATTERN.test(callId) || !callerUsername || callerUsername.length > 64) {
+      return null;
+    }
+
+    return {
+      callId,
+      mode: parsed.searchParams.get('mode') === 'video' ? 'video' : 'audio',
+      callerUsername
+    };
+  } catch {
+    return null;
+  }
+}
 type KnownChatUser = {
   id?: string;
   username: string;
@@ -296,13 +337,13 @@ type VerificationResponse = {
 
 type ResendVerificationResponse = {
   ok: boolean;
-  verificationEmailSent: boolean;
+  verificationEmailSent?: boolean;
   verificationCodePreview?: string;
 };
 
 type PasswordResetRequestResponse = {
   ok: boolean;
-  resetEmailSent: boolean;
+  resetEmailSent?: boolean;
   resetCodePreview?: string;
 };
 
@@ -336,8 +377,8 @@ type KrynoBackendContextValue = {
     verificationCodePreview?: string;
   }>;
   verifyEmail: (email: string, code: string) => Promise<void>;
-  resendVerification: (email: string) => Promise<{ verificationEmailSent: boolean; verificationCodePreview?: string }>;
-  requestPasswordReset: (email: string) => Promise<{ resetEmailSent: boolean; resetCodePreview?: string }>;
+  resendVerification: (email: string) => Promise<{ verificationEmailSent?: boolean; verificationCodePreview?: string }>;
+  requestPasswordReset: (email: string) => Promise<{ resetEmailSent?: boolean; resetCodePreview?: string }>;
   resetPassword: (email: string, code: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshSocial: () => Promise<void>;
@@ -354,7 +395,7 @@ type KrynoBackendContextValue = {
   getConversationSettings: (peerLookup: string) => Promise<ConversationSettings>;
   updateConversationSettings: (
     peerLookup: string,
-    input: Partial<Pick<ConversationSettings, 'themeId' | 'muted' | 'focusMode' | 'privateMode'>>
+    input: Partial<Pick<ConversationSettings, 'themeId' | 'vibeId' | 'muted' | 'focusMode' | 'privateMode'>>
   ) => Promise<ConversationSettings>;
   blockUser: (peerLookup: string) => Promise<ConversationSettings>;
   unblockUser: (peerLookup: string) => Promise<ConversationSettings>;
@@ -376,7 +417,7 @@ type KrynoBackendContextValue = {
   currentCall: CallStateModel | null;
   localCallStreamUrl: string | null;
   remoteCallStreamUrl: string | null;
-  createLiveKitCallToken: (input: { mode: MobileCallMode; recipientLookup?: string; roomName?: string }) => Promise<LiveKitCallToken>;
+  createLiveKitCallToken: (callId: string) => Promise<LiveKitCallToken>;
   startConversationCall: (conversation: Pick<ConversationSeed, 'conversationKey' | 'recipientLookup' | 'user'>, mode: MobileCallMode) => Promise<void>;
   acceptCurrentCall: () => Promise<void>;
   rejectCurrentCall: (reason?: string) => Promise<void>;
@@ -450,7 +491,6 @@ const BUILD_LOCKED_BACKEND_ORIGIN = !__DEV__ && DEFAULT_BACKEND_ORIGIN.trim()
   : '';
 const STABLE_STARTUP_MODE = process.env.EXPO_PUBLIC_KRYNO_STABLE_STARTUP === 'true';
 const ACCESS_TOKEN_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
-const SESSION_EXPIRED_MESSAGE = 'Session expired, please login again.';
 const CALL_SERVICE_RECONNECTING_MESSAGE = 'Connecting call service. Please try again in a few seconds.';
 
 const TIER_SEQUENCE = ['Basic', 'Inner Circle', 'Elite'] as const;
@@ -644,33 +684,6 @@ function isAccessTokenExpiredError(error: unknown) {
   return /access token expired|please refresh your session/i.test(message);
 }
 
-function isUnrecoverableAuthError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error ?? '');
-  return /session expired|refresh token reuse|invalid refresh token|refresh token expired|refresh token does not match|device mismatch|REFRESH_REUSE_DETECTED|INVALID_REFRESH_TOKEN|REFRESH_EXPIRED|DEVICE_MISMATCH/i.test(message);
-}
-
-function safeUserFacingError(error: unknown, fallback: string) {
-  const message = error instanceof Error ? error.message : String(error ?? '');
-
-  if (isUnrecoverableAuthError(message) || /access token expired|please refresh your session/i.test(message)) {
-    return SESSION_EXPIRED_MESSAGE;
-  }
-
-  if (/secure relay is reconnecting|secure relay is not connected|direct relay socket|relay error/i.test(message)) {
-    return CALL_SERVICE_RECONNECTING_MESSAGE;
-  }
-
-  if (/rate limit/i.test(message)) {
-    return 'Please wait a moment before trying again.';
-  }
-
-  if (/provider does not exist|push_provider|column .* does not exist/i.test(message)) {
-    return 'Kryno is finishing a service update. Please reopen the app and try again.';
-  }
-
-  return message || fallback;
-}
-
 function getRateLimitRetrySeconds(error: unknown) {
   const message = error instanceof Error ? error.message : String(error ?? '');
   const match = message.match(/retry in\s+(\d+)\s+seconds?/i);
@@ -728,29 +741,10 @@ function getRelayWebSocketUrl(origin: string) {
   return `${origin}/api/messages/ws`;
 }
 
-async function secureGet(key: string) {
-  try {
-    return await SecureStore.getItemAsync(key);
-  } catch {
-    return AsyncStorage.getItem(key);
-  }
-}
-
-async function secureSet(key: string, value: string) {
-  try {
-    await SecureStore.setItemAsync(key, value);
-  } catch {
-    await AsyncStorage.setItem(key, value);
-  }
-}
-
-async function secureDelete(key: string) {
-  try {
-    await SecureStore.deleteItemAsync(key);
-  } catch {
-    await AsyncStorage.removeItem(key);
-  }
-}
+const sessionStorage = createSessionStorage(SESSION_STORAGE_KEY, {
+  secure: SecureStore,
+  legacy: AsyncStorage
+});
 
 async function loadDeviceProfile() {
   const stored = await AsyncStorage.getItem(DEVICE_PROFILE_STORAGE_KEY);
@@ -775,6 +769,17 @@ async function loadDeviceProfile() {
   return profile;
 }
 
+class ApiResponseError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string
+  ) {
+    super(message);
+    this.name = 'ApiResponseError';
+  }
+}
+
 async function parseJsonResponse<T>(response: Response) {
   const json = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -784,7 +789,11 @@ async function parseJsonResponse<T>(response: Response) {
         : typeof json?.error === 'string'
           ? json.error
           : 'Request failed.';
-    throw new Error(message);
+    throw new ApiResponseError(
+      message,
+      response.status,
+      typeof json?.error === 'string' ? json.error : 'REQUEST_FAILED'
+    );
   }
   return json as T;
 }
@@ -812,6 +821,8 @@ async function fetchWithTimeout(
     clearTimeout(timeout);
   }
 }
+
+const AUTH_REQUEST_TIMEOUT_MS = 45_000;
 
 type ApiFetchInit = RequestInit & {
   timeoutMs?: number;
@@ -863,6 +874,16 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const [remoteCallStreamUrl, setRemoteCallStreamUrl] = useState<string | null>(null);
   const [foregroundNotice, setForegroundNotice] = useState<{ title: string; body: string; createdAt: string } | null>(null);
   const sessionRef = useRef<AuthSession | null>(null);
+  const sessionLifecycleRef = useRef<SessionLifecycle<AuthSession> | null>(null);
+  if (!sessionLifecycleRef.current) {
+    sessionLifecycleRef.current = new SessionLifecycle<AuthSession>({
+      persist: (next) => next ? sessionStorage.write(JSON.stringify(next)) : sessionStorage.clear(),
+      publish: (next) => {
+        sessionRef.current = next;
+        setSession(next);
+      }
+    });
+  }
   const seenInboxRef = useRef<Set<string>>(new Set());
   const knownUsersRef = useRef<Record<string, KnownChatUser>>({});
   const relayHandleRef = useRef<RelayHandle | null>(null);
@@ -877,7 +898,6 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const pendingCallMediaKeysRef = useRef<Map<string, MobileSignalCallMediaKey>>(new Map());
   const callConnectedNotifiedRef = useRef<Set<string>>(new Set());
   const lastAuthRefreshAtRef = useRef(0);
-  const authRefreshPromiseRef = useRef<Promise<AuthSession> | null>(null);
   const sessionRecoveryHandledRef = useRef(false);
 
   const loadMobileCallRuntime = useCallback(async () => {
@@ -891,12 +911,60 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   }, []);
 
   useEffect(() => {
-    sessionRef.current = session;
-  }, [session]);
-
-  useEffect(() => {
     currentCallRef.current = currentCall;
   }, [currentCall]);
+
+  const openIncomingCallLink = useCallback((url: string) => {
+    const incoming = parseIncomingCallLink(url);
+    if (!incoming || !sessionRef.current) {
+      return;
+    }
+
+    console.log('[KrynoCall] incoming call link opened', {
+      callId: incoming.callId,
+      mode: incoming.mode
+    });
+    setCurrentCall((current) => {
+      if (current?.callId === incoming.callId) {
+        return current;
+      }
+
+      return {
+        callId: incoming.callId,
+        conversationKey: incoming.callerUsername,
+        direction: 'incoming',
+        phase: 'ringing',
+        mode: incoming.mode,
+        mediaProvider: 'livekit',
+        roomName: null,
+        liveKitToken: null,
+        mediaEncryptionKey: null,
+        remoteLabel: incoming.callerUsername,
+        remoteSessionId: null,
+        muted: false,
+        cameraEnabled: incoming.mode === 'video',
+        status: incoming.mode === 'video' ? 'Incoming video call' : 'Incoming audio call',
+        startedAt: new Date().toISOString()
+      };
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!initialized || !session?.user.id) {
+      return;
+    }
+
+    void Linking.getInitialURL().then((url) => {
+      if (url) {
+        openIncomingCallLink(url);
+      }
+    });
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      openIncomingCallLink(url);
+    });
+
+    return () => subscription.remove();
+  }, [initialized, openIncomingCallLink, session?.user.id]);
 
   const clearUnrecoverableSession = useCallback(async () => {
     if (sessionRecoveryHandledRef.current) {
@@ -904,7 +972,6 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     }
 
     sessionRecoveryHandledRef.current = true;
-    authRefreshPromiseRef.current = null;
     relayHandleRef.current?.disconnect();
     relayHandleRef.current = null;
     peerConnectionRef.current?.close?.();
@@ -918,20 +985,14 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
     setLocalCallStreamUrl(null);
     setRemoteCallStreamUrl(null);
     setCurrentCall(null);
-    setSession(null);
-    sessionRef.current = null;
     setBootstrap(null);
     setProfile(null);
     setBillingEntitlement(FREE_BILLING_ENTITLEMENT);
-    await secureDelete(SESSION_STORAGE_KEY);
+    await sessionLifecycleRef.current!.replace(null);
     setError(SESSION_EXPIRED_MESSAGE);
   }, []);
 
-  const refreshAuthSession = useCallback(async () => {
-    if (authRefreshPromiseRef.current) {
-      return authRefreshPromiseRef.current;
-    }
-
+  const refreshAuthSession = useCallback(async (failedAccessToken?: string) => {
     const apiOrigin = requireBackendOrigin(backendOrigin);
     const activeSession = sessionRef.current;
 
@@ -939,48 +1000,32 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       throw new Error('Please sign in again to continue.');
     }
 
-    const refreshPromise = (async () => {
-      try {
+    try {
+      const nextSession = await sessionLifecycleRef.current!.refresh(async (current) => {
         const refreshResponse = await fetchWithTimeout(`${apiOrigin}/api/auth/refresh`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            refresh_token: activeSession.refreshToken,
+            refresh_token: current.refreshToken,
             device_id: deviceProfile.deviceId
           })
         });
 
         const refreshed = await parseJsonResponse<{ accessToken: string; refreshToken: string }>(refreshResponse);
-        const nextSession = {
-          ...activeSession,
-          accessToken: refreshed.accessToken,
-          refreshToken: refreshed.refreshToken
-        };
-
-        sessionRecoveryHandledRef.current = false;
-        setSession(nextSession);
-        await secureSet(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
-        sessionRef.current = nextSession;
-        lastAuthRefreshAtRef.current = Date.now();
-        return nextSession;
-      } catch (refreshError) {
-        if (isUnrecoverableAuthError(refreshError)) {
-          await clearUnrecoverableSession();
-          throw new Error(SESSION_EXPIRED_MESSAGE);
+        if (!refreshed.accessToken || !refreshed.refreshToken) {
+          throw new Error('Unable to renew your sign-in. Please try again.');
         }
-
-        throw refreshError;
+        return refreshed;
+      }, failedAccessToken);
+      sessionRecoveryHandledRef.current = false;
+      lastAuthRefreshAtRef.current = Date.now();
+      return nextSession;
+    } catch (refreshError) {
+      if (isUnrecoverableAuthError(refreshError) && sessionRef.current === activeSession) {
+        await clearUnrecoverableSession();
+        throw new Error(SESSION_EXPIRED_MESSAGE);
       }
-    })();
-
-    authRefreshPromiseRef.current = refreshPromise;
-
-    try {
-      return await refreshPromise;
-    } finally {
-      if (authRefreshPromiseRef.current === refreshPromise) {
-        authRefreshPromiseRef.current = null;
-      }
+      throw refreshError;
     }
   }, [backendOrigin, clearUnrecoverableSession, deviceProfile]);
 
@@ -1012,7 +1057,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       }, timeoutMs ?? 20_000);
 
       if (response.status === 401 && allowRefresh && activeSession && deviceProfile) {
-        await refreshAuthSession();
+        await refreshAuthSession(activeSession.accessToken);
         return apiFetch<T>(path, init, false);
       }
 
@@ -1628,7 +1673,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         await migrateMobileStartupStorage();
         const [storedOrigin, storedSession, nextDeviceProfile, cachedMessages, cachedThreads, cachedUsers, cachedSeenInbox] = await Promise.all([
           AsyncStorage.getItem(BACKEND_ORIGIN_STORAGE_KEY),
-          secureGet(SESSION_STORAGE_KEY),
+          sessionStorage.read(),
           loadDeviceProfile(),
           loadStoredJson<ChatMessageModel[]>(MOBILE_CHAT_MESSAGES_STORAGE_KEY, []),
           loadStoredJson<ConversationSeed[]>(MOBILE_CHAT_THREADS_STORAGE_KEY, []),
@@ -1666,8 +1711,10 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
         if (storedSession) {
           const parsedSession = JSON.parse(storedSession) as AuthSession;
-          setSession(parsedSession);
-          sessionRef.current = parsedSession;
+          if (!parsedSession?.user?.id || !parsedSession.accessToken || !parsedSession.refreshToken) {
+            throw new Error('Your saved sign-in could not be read. Please sign in again.');
+          }
+          await sessionLifecycleRef.current!.replace(parsedSession);
         }
         console.log('[KrynoStartup] auth state loaded', storedSession ? 'authenticated' : 'signed_out');
       } catch (hydrateError) {
@@ -1917,13 +1964,12 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
             device_name: deviceProfile.deviceName,
             device_public_key: buildDevicePublicKey(deviceProfile.deviceSeed)
           })
-        });
+        }, AUTH_REQUEST_TIMEOUT_MS);
 
         const nextSession = await parseJsonResponse<AuthSession>(response);
         sessionRecoveryHandledRef.current = false;
-        setSession(nextSession);
-        sessionRef.current = nextSession;
-        await secureSet(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
+        await sessionLifecycleRef.current!.replace(nextSession);
+        lastAuthRefreshAtRef.current = Date.now();
         setLoading(false);
         void syncAuthenticatedState();
       } catch (loginError) {
@@ -2017,7 +2063,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           body: JSON.stringify({
             email: email.trim().toLowerCase()
           })
-        });
+        }, AUTH_REQUEST_TIMEOUT_MS);
 
         const result = await parseJsonResponse<ResendVerificationResponse>(response);
         return {
@@ -2047,7 +2093,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           body: JSON.stringify({
             email: email.trim().toLowerCase()
           })
-        });
+        }, AUTH_REQUEST_TIMEOUT_MS);
 
         const result = await parseJsonResponse<PasswordResetRequestResponse>(response);
         return {
@@ -2094,8 +2140,18 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
   const logout = useCallback(async () => {
     const currentSession = sessionRef.current;
-
+    relayHandleRef.current?.disconnect();
+    relayHandleRef.current = null;
+    teardownCallMedia();
+    setCurrentCall(null);
+    setBootstrap(null);
+    setProfile(null);
+    setBillingEntitlement(FREE_BILLING_ENTITLEMENT);
+    sessionRecoveryHandledRef.current = false;
+    // Invalidate pending refreshes before waiting for any network response.
+    const clearLocalSession = sessionLifecycleRef.current!.replace(null);
     try {
+      await clearLocalSession;
       if (currentSession) {
         const apiOrigin = requireBackendOrigin(backendOrigin);
         await fetchWithTimeout(`${apiOrigin}/api/auth/logout`, {
@@ -2105,17 +2161,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         }).catch(() => undefined);
       }
     } finally {
-      relayHandleRef.current?.disconnect();
-      relayHandleRef.current = null;
-      teardownCallMedia();
-      setCurrentCall(null);
-      setSession(null);
-      sessionRef.current = null;
-      sessionRecoveryHandledRef.current = false;
-      setBootstrap(null);
-      setProfile(null);
-      setBillingEntitlement(FREE_BILLING_ENTITLEMENT);
-      await secureDelete(SESSION_STORAGE_KEY);
+      await clearKrynoNotifications().catch(() => undefined);
     }
   }, [backendOrigin, teardownCallMedia]);
 
@@ -2137,13 +2183,22 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   }, [loadBillingState]);
 
   const createLiveKitCallToken = useCallback(
-    async (input: { mode: MobileCallMode; recipientLookup?: string; roomName?: string }) =>
+    async (callId: string) =>
       apiFetch<LiveKitCallToken>('/calls/livekit-token', {
         method: 'POST',
         body: JSON.stringify({
-          mode: input.mode,
-          recipient_lookup: input.recipientLookup,
-          room_name: input.roomName
+          call_id: callId
+        })
+      }),
+    [apiFetch]
+  );
+
+  const acceptLiveKitCall = useCallback(
+    async (callId: string) =>
+      apiFetch<LiveKitCallToken>('/calls/accept', {
+        method: 'POST',
+        body: JSON.stringify({
+          call_id: callId
         })
       }),
     [apiFetch]
@@ -2284,11 +2339,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
             }
 
             try {
-              const token = await createLiveKitCallToken({
-                mode: activeCall.mode,
-                recipientLookup: activeCall.conversationKey,
-                roomName
-              });
+              const token = await createLiveKitCallToken(event.callId);
               setCurrentCall((current) =>
                 current && current.callId === event.callId
                   ? {
@@ -2334,11 +2385,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
 
           if (mediaProvider === 'livekit' && activeCall && roomName && !activeCall.liveKitToken) {
             try {
-              const token = await createLiveKitCallToken({
-                mode: activeCall.mode,
-                recipientLookup: activeCall.conversationKey,
-                roomName
-              });
+              const token = await createLiveKitCallToken(event.callId);
               setCurrentCall((current) =>
                 current && current.callId === event.callId
                   ? {
@@ -2507,14 +2554,6 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
       const roomName = createManagedCallRoomName(mode, callId);
       const mediaProvider: CallStateModel['mediaProvider'] = 'livekit';
       const mediaEncryptionKey: string | null = null;
-      const liveKitToken = await createLiveKitCallToken({
-        mode,
-        recipientLookup: conversation.recipientLookup,
-        roomName
-      }).catch((error) => {
-        throw new Error(safeUserFacingError(error, 'Managed call service is unavailable right now.'));
-      });
-
       setCurrentCall({
         callId,
         conversationKey: conversation.conversationKey,
@@ -2523,7 +2562,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         mode,
         mediaProvider,
         roomName,
-        liveKitToken,
+        liveKitToken: null,
         mediaEncryptionKey,
         remoteLabel: conversation.user.name,
         remoteSessionId: null,
@@ -2547,21 +2586,106 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         throw new Error(CALL_SERVICE_RECONNECTING_MESSAGE);
       }
     },
-    [createLiveKitCallToken, deviceProfile, refreshAuthSession]
+    [deviceProfile, refreshAuthSession]
   );
+
+  useEffect(() => {
+    if (
+      !currentCall ||
+      currentCall.direction !== 'outgoing' ||
+      currentCall.phase !== 'ringing' ||
+      currentCall.mediaProvider !== 'livekit' ||
+      currentCall.liveKitToken
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const callId = currentCall.callId;
+    const deadline = Date.now() + 70_000;
+
+    const waitForAcceptance = async () => {
+      await wait(500);
+
+      while (!cancelled && Date.now() < deadline) {
+        const activeCall = currentCallRef.current;
+        if (
+          !activeCall ||
+          activeCall.callId !== callId ||
+          activeCall.direction !== 'outgoing' ||
+          activeCall.phase !== 'ringing' ||
+          activeCall.liveKitToken
+        ) {
+          return;
+        }
+
+        try {
+          const token = await createLiveKitCallToken(callId);
+          if (cancelled) {
+            return;
+          }
+
+          setCurrentCall((entry) =>
+            entry && entry.callId === callId
+              ? {
+                  ...entry,
+                  phase: 'connecting',
+                  roomName: token.roomName,
+                  liveKitToken: token,
+                  status: 'Joining LiveKit media room...'
+                }
+              : entry
+          );
+          return;
+        } catch (pollError) {
+          const code = pollError instanceof ApiResponseError ? pollError.code : '';
+          if (code === 'CALL_ENDED' || code === 'CALL_EXPIRED') {
+            if (!cancelled) {
+              finishCurrentCall(code === 'CALL_EXPIRED' ? 'Call ended: no answer' : 'Call ended');
+            }
+            return;
+          }
+
+          if (
+            code &&
+            code !== 'CALL_NOT_ACCEPTED' &&
+            code !== 'CALL_NOT_FOUND' &&
+            code !== 'REQUEST_FAILED'
+          ) {
+            console.warn('[KrynoCall] acceptance poll paused', code);
+          }
+        }
+
+        await wait(900);
+      }
+
+      const activeCall = currentCallRef.current;
+      if (!cancelled && activeCall?.callId === callId && activeCall.phase === 'ringing') {
+        finishCurrentCall('Call ended: no answer');
+      }
+    };
+
+    void waitForAcceptance();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    createLiveKitCallToken,
+    currentCall?.callId,
+    currentCall?.direction,
+    currentCall?.liveKitToken,
+    currentCall?.mediaProvider,
+    currentCall?.phase,
+    finishCurrentCall
+  ]);
 
   const acceptCurrentCall = useCallback(async () => {
     const activeCall = currentCallRef.current;
-    if (!activeCall || !relayHandleRef.current) {
+    if (!activeCall) {
       return;
     }
 
     if (activeCall.mediaProvider === 'livekit') {
-      if (!activeCall.roomName) {
-        finishCurrentCall('Call failed: secure room was missing');
-        return;
-      }
-
       console.log('[KrynoCall] accept requested', {
         callId: activeCall.callId,
         mode: activeCall.mode,
@@ -2569,58 +2693,49 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
         roomName: activeCall.roomName
       });
 
-      const accepted = relayHandleRef.current.send({
+      relayHandleRef.current?.send({
         type: 'call_accept',
         callId: activeCall.callId
       });
 
-      if (!accepted) {
-        finishCurrentCall('Call failed: call service is reconnecting');
-        return;
-      }
-
       setCurrentCall((current) =>
-        current
+        current && current.callId === activeCall.callId
           ? {
               ...current,
               phase: 'connecting',
-              status: 'Answer accepted. Preparing LiveKit media room...'
+              status: 'Answering call...'
             }
           : current
       );
 
       try {
-        const token = await createLiveKitCallToken({
-          mode: activeCall.mode,
-          recipientLookup: activeCall.conversationKey,
-          roomName: activeCall.roomName
-        });
-
+        const token = await acceptLiveKitCall(activeCall.callId);
         setCurrentCall((current) =>
-          current
+          current && current.callId === activeCall.callId
             ? {
                 ...current,
                 phase: 'connecting',
+                roomName: token.roomName,
                 liveKitToken: token,
                 status: 'Joining LiveKit media room...'
               }
             : current
         );
-        console.log('[KrynoCall] receiver livekit token ready', {
-          callId: activeCall.callId,
-          roomName: activeCall.roomName
-        });
-      } catch (callTokenError) {
+      } catch (acceptError) {
         relayHandleRef.current?.send({
-          type: 'call_end',
+          type: 'call_reject',
           callId: activeCall.callId,
-          reason: 'failed'
+          reason: 'accept_failed'
         });
         finishCurrentCall(
-          `Call failed: ${callTokenError instanceof Error ? callTokenError.message : 'managed media token unavailable'}`
+          `Call failed: ${safeUserFacingError(acceptError, 'Unable to answer this call. Please try again.')}`
         );
-        return;
       }
+      return;
+    }
+
+    if (!relayHandleRef.current) {
+      finishCurrentCall('Call failed: call service is reconnecting');
       return;
     }
 
@@ -2639,7 +2754,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
           }
         : current
     );
-  }, [createLiveKitCallToken, fetchIceConfig, finishCurrentCall, prepareLocalCallMedia]);
+  }, [acceptLiveKitCall, fetchIceConfig, finishCurrentCall, prepareLocalCallMedia]);
 
   const rejectCurrentCall = useCallback(async (reason = 'declined') => {
     const activeCall = currentCallRef.current;
@@ -3299,7 +3414,7 @@ export function KrynoBackendProvider({ children }: { children: React.ReactNode }
   const updateConversationSettings = useCallback(
     async (
       peerLookup: string,
-      input: Partial<Pick<ConversationSettings, 'themeId' | 'muted' | 'focusMode' | 'privateMode'>>
+      input: Partial<Pick<ConversationSettings, 'themeId' | 'vibeId' | 'muted' | 'focusMode' | 'privateMode'>>
     ) =>
       apiFetch<ConversationSettings>(`/messages/settings/${encodeURIComponent(peerLookup.replace(/^@/, '').trim())}`, {
         method: 'PUT',

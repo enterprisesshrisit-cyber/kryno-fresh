@@ -3,11 +3,13 @@ import { z } from 'zod';
 import { env } from '../config/env.js';
 import { callsService } from '../services/calls.service.js';
 
-const liveKitTokenSchema = z.object({
-  mode: z.enum(['audio', 'video']),
-  recipient_lookup: z.string().trim().min(1).max(128).optional(),
-  room_name: z.string().trim().min(8).max(128).regex(/^[a-zA-Z0-9_-]+$/).optional()
-});
+export const liveKitTokenSchema = z.object({
+  call_id: z.uuid()
+}).strict();
+
+export const acceptLiveKitCallSchema = z.object({
+  call_id: z.uuid()
+}).strict();
 
 function parseUrls(value: string | undefined) {
   return (value ?? '')
@@ -53,9 +55,22 @@ export async function createLiveKitTokenController(request: FastifyRequest, repl
       sessionId: request.auth.sessionId
     },
     {
-      mode: body.mode,
-      recipientLookup: body.recipient_lookup,
-      roomName: body.room_name
+      callId: body.call_id
+    }
+  );
+
+  return reply.code(200).send(token);
+}
+
+export async function acceptLiveKitCallController(request: FastifyRequest, reply: FastifyReply) {
+  const body = acceptLiveKitCallSchema.parse(request.body);
+  const token = await callsService.acceptLiveKitCall(
+    {
+      userId: request.auth.userId,
+      sessionId: request.auth.sessionId
+    },
+    {
+      callId: body.call_id
     }
   );
 

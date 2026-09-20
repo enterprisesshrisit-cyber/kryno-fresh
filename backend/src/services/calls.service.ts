@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { AccessToken } from 'livekit-server-sdk';
 import { pool } from '../db/pool.js';
 import { env } from '../config/env.js';
@@ -10,6 +9,7 @@ import { relayService } from './relay.service.js';
 const CALL_RING_TIMEOUT_MS = 60_000;
 const CALL_RECONNECT_GRACE_MS = 75_000;
 const LIVEKIT_TOKEN_TTL_SECONDS = 15 * 60;
+const CALL_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type CallMode = 'audio' | 'video';
 
@@ -19,9 +19,20 @@ type RelayAuthContext = {
 };
 
 type LiveKitTokenInput = {
+  callId: string;
+};
+
+type PersistedLiveKitCall = {
+  call_id: string;
   mode: CallMode;
-  roomName?: string | null;
-  recipientLookup?: string | null;
+  caller_user_id: string;
+  caller_device_session_id: string;
+  recipient_user_id: string;
+  accepted_device_session_id: string | null;
+  media_provider: 'livekit' | 'webrtc';
+  room_name: string | null;
+  state: string;
+  expires_at: string | Date;
 };
 
 type CallInviteCommand = {
@@ -201,9 +212,93 @@ export class CallsService {
     });
   }
 
+  private broadcastEnded(call: ActiveCall, reason: string, endedBySessionId?: string | null) {
+    const participants = new Set<string>([call.callerSessionId, ...call.invitedSessionIds]);
+    if (call.acceptedSessionId) {
+      participants.add(call.acceptedSessionId);
+    }
+
+    for (const sessionId of participants) {
+      this.sendEnded(call, sessionId, reason, endedBySessionId);
+    }
+  }
+
+  private async handleRingTimeout(callId: string) {
+    const call = this.callsById.get(callId);
+    if (!call || call.acceptedSessionId) {
+      return;
+    }
+
+    try {
+      const expired = await pool.query<{ call_id: string }>(
+        `
+          update call_sessions
+          set
+            state = 'missed',
+            ended_at = now(),
+            end_reason = 'missed',
+            updated_at = now()
+          where call_id = $1
+            and state = 'ringing'
+            and accepted_device_session_id is null
+            and expires_at <= now()
+          returning call_id
+        `,
+        [callId]
+      );
+
+      if (expired.rows[0]) {
+        logCallEvent('ring_timeout', {
+          callId,
+          state: call.state
+        });
+        this.broadcastEnded(call, 'missed', null);
+        this.clearCall(call);
+        return;
+      }
+
+      const persisted = await pool.query<{
+        state: string;
+        accepted_device_session_id: string | null;
+        expires_at: string | Date;
+      }>(
+        `
+          select state, accepted_device_session_id, expires_at
+          from call_sessions
+          where call_id = $1
+          limit 1
+        `,
+        [callId]
+      );
+      const row = persisted.rows[0];
+
+      if (!row || row.state !== 'ringing' || row.accepted_device_session_id) {
+        this.clearCall(call);
+        return;
+      }
+
+      const remainingMs = new Date(row.expires_at).getTime() - Date.now();
+      call.timeout = setTimeout(
+        () => void this.handleRingTimeout(callId),
+        Math.max(250, remainingMs + 50)
+      );
+    } catch (error) {
+      captureException(error, {
+        surface: 'CallsService',
+        reason: 'call_ring_timeout_check_failed',
+        callId
+      });
+
+      const activeCall = this.callsById.get(callId);
+      if (activeCall && !activeCall.acceptedSessionId) {
+        activeCall.timeout = setTimeout(() => void this.handleRingTimeout(callId), 2_000);
+      }
+    }
+  }
+
   private async persistCallStart(call: ActiveCall) {
     try {
-      await pool.query(
+      const result = await pool.query<{ call_id: string }>(
         `
           insert into call_sessions (
             call_id,
@@ -219,21 +314,8 @@ export class CallsService {
             updated_at
           )
           values ($1, $2, $3, $4, $5, $6, $7, 'ringing', now(), $8, now())
-          on conflict (call_id) do update set
-            mode = excluded.mode,
-            caller_user_id = excluded.caller_user_id,
-            caller_device_session_id = excluded.caller_device_session_id,
-            recipient_user_id = excluded.recipient_user_id,
-            media_provider = excluded.media_provider,
-            room_name = excluded.room_name,
-            state = 'ringing',
-            accepted_device_session_id = null,
-            accepted_at = null,
-            connected_at = null,
-            ended_at = null,
-            end_reason = null,
-            expires_at = excluded.expires_at,
-            updated_at = now()
+          on conflict (call_id) do nothing
+          returning call_id
         `,
         [
           call.callId,
@@ -246,12 +328,18 @@ export class CallsService {
           call.expiresAt
         ]
       );
+      if (!result.rows[0]) {
+        throw new AppError(409, 'Call identifier is already in use.', 'CALL_ID_CONFLICT');
+      }
     } catch (error) {
       captureException(error, {
         surface: 'CallsService',
         reason: 'call_state_insert_failed',
         callId: call.callId
       });
+      throw error instanceof AppError
+        ? error
+        : new AppError(503, 'Call service is temporarily unavailable.', 'CALL_STATE_UNAVAILABLE');
     }
   }
 
@@ -264,7 +352,7 @@ export class CallsService {
     } = {}
   ) {
     try {
-      await pool.query(
+      const result = await pool.query(
         `
           update call_sessions
           set
@@ -274,11 +362,13 @@ export class CallsService {
             connected_at = case when $2 = 'connected' and connected_at is null then now() else connected_at end,
             ended_at = case when $2 in ('ended', 'missed', 'declined', 'cancelled', 'expired', 'unavailable', 'failed') then now() else ended_at end,
             end_reason = coalesce($4, end_reason),
+            expires_at = case when $2 in ('connecting', 'connected') then greatest(expires_at, now() + interval '4 hours') else expires_at end,
             updated_at = now()
           where call_id = $1
         `,
         [call.callId, state, options.acceptedSessionId ?? null, options.endReason ?? null]
       );
+      return (result.rowCount ?? 0) > 0;
     } catch (error) {
       captureException(error, {
         surface: 'CallsService',
@@ -286,6 +376,7 @@ export class CallsService {
         callId: call.callId,
         state
       });
+      return false;
     }
   }
 
@@ -308,15 +399,7 @@ export class CallsService {
       endReason: reason
     });
 
-    const participants = new Set<string>([call.callerSessionId, ...call.invitedSessionIds]);
-    if (call.acceptedSessionId) {
-      participants.add(call.acceptedSessionId);
-    }
-
-    for (const sessionId of participants) {
-      this.sendEnded(call, sessionId, reason, endedBySessionId);
-    }
-
+    this.broadcastEnded(call, reason, endedBySessionId);
     this.clearCall(call);
   }
 
@@ -419,41 +502,241 @@ export class CallsService {
     };
   }
 
-  async createLiveKitToken(auth: RelayAuthContext, input: LiveKitTokenInput) {
-    const liveKit = this.requireLiveKitConfig();
-    const callerUsername = await this.resolveUsername(auth.userId);
-    const roomName = input.roomName?.trim() || `kryno-${input.mode}-${randomUUID()}`;
-    const participantIdentity = `${auth.userId}:${auth.sessionId}`;
-    let recipient: { id: string; username: string } | null = null;
+  private notifyLiveKitAccepted(
+    auth: RelayAuthContext,
+    call: PersistedLiveKitCall,
+    newlyAccepted: boolean
+  ) {
+    if (!newlyAccepted) {
+      return;
+    }
 
-    logCallEvent('livekit_token_requested', {
-      userId: auth.userId,
-      sessionId: auth.sessionId,
-      mode: input.mode,
-      roomName,
-      hasRecipientLookup: Boolean(input.recipientLookup?.trim())
-    });
+    const activeCall = this.callsById.get(call.call_id);
+    if (activeCall) {
+      clearTimeout(activeCall.timeout);
+      activeCall.acceptedSessionId = auth.sessionId;
+      activeCall.state = 'connecting';
+      this.attachSession(activeCall.callId, auth.sessionId);
 
-    if (input.recipientLookup?.trim()) {
-      recipient = await this.resolveRecipient(input.recipientLookup);
-
-      if (!recipient) {
-        throw new AppError(404, 'Recipient not found.', 'RECIPIENT_NOT_FOUND');
+      for (const invitedSessionId of activeCall.invitedSessionIds) {
+        if (invitedSessionId !== auth.sessionId) {
+          this.sendEnded(activeCall, invitedSessionId, 'answered_elsewhere', auth.sessionId);
+          this.detachSession(activeCall.callId, invitedSessionId);
+        }
       }
 
-      if (recipient.id === auth.userId) {
-        throw new AppError(400, 'You cannot call your own account.', 'SELF_CALL_NOT_ALLOWED');
+      activeCall.invitedSessionIds = new Set([auth.sessionId]);
+    } else {
+      for (const sessionId of relayService.listUserSessionIds(call.recipient_user_id)) {
+        if (sessionId !== auth.sessionId) {
+          relayService.sendEventToSession(sessionId, {
+            type: 'call_ended',
+            callId: call.call_id,
+            reason: 'answered_elsewhere',
+            endedBySessionId: auth.sessionId
+          });
+        }
       }
     }
 
+    logCallEvent('accepted', {
+      callId: call.call_id,
+      callerSessionId: call.caller_device_session_id,
+      acceptedSessionId: auth.sessionId,
+      mediaProvider: call.media_provider,
+      roomName: call.room_name
+    });
+
+    relayService.sendEventToSession(call.caller_device_session_id, {
+      type: 'call_accepted',
+      callId: call.call_id,
+      peerSessionId: auth.sessionId,
+      mediaProvider: call.media_provider,
+      roomName: call.room_name
+    });
+
+    relayService.sendEventToSession(auth.sessionId, {
+      type: 'call_join',
+      callId: call.call_id,
+      peerSessionId: call.caller_device_session_id,
+      mediaProvider: call.media_provider,
+      roomName: call.room_name
+    });
+  }
+
+  private async persistLiveKitAcceptance(auth: RelayAuthContext, input: LiveKitTokenInput) {
+    if (!CALL_ID_PATTERN.test(input.callId)) {
+      throw new AppError(400, 'Call request is invalid.', 'INVALID_CALL_ID');
+    }
+
+    const accepted = await pool.query<PersistedLiveKitCall>(
+      `
+        update call_sessions
+        set
+          state = 'connecting',
+          accepted_device_session_id = $3,
+          accepted_at = coalesce(accepted_at, now()),
+          expires_at = greatest(expires_at, now() + interval '4 hours'),
+          updated_at = now()
+        where call_id = $1
+          and recipient_user_id = $2
+          and media_provider = 'livekit'
+          and state = 'ringing'
+          and accepted_device_session_id is null
+          and expires_at > now()
+        returning
+          call_id,
+          mode,
+          caller_user_id,
+          caller_device_session_id,
+          recipient_user_id,
+          accepted_device_session_id,
+          media_provider,
+          room_name,
+          state,
+          expires_at
+      `,
+      [input.callId, auth.userId, auth.sessionId]
+    );
+
+    let call = accepted.rows[0];
+    const newlyAccepted = Boolean(call);
+    if (!call) {
+      const existing = await pool.query<PersistedLiveKitCall>(
+        `
+          select
+            call_id,
+            mode,
+            caller_user_id,
+            caller_device_session_id,
+            recipient_user_id,
+            accepted_device_session_id,
+            media_provider,
+            room_name,
+            state,
+            expires_at
+          from call_sessions
+          where call_id = $1
+          limit 1
+        `,
+        [input.callId]
+      );
+      call = existing.rows[0];
+    }
+
+    if (!call) {
+      throw new AppError(404, 'Call is no longer available.', 'CALL_NOT_FOUND');
+    }
+    if (call.recipient_user_id !== auth.userId) {
+      throw new AppError(403, 'You are not the recipient of this call.', 'CALL_ACCESS_DENIED');
+    }
+    if (call.media_provider !== 'livekit') {
+      throw new AppError(409, 'This call does not use managed media.', 'CALL_PROVIDER_MISMATCH');
+    }
+    if (new Date(call.expires_at).getTime() <= Date.now()) {
+      throw new AppError(410, 'This call has expired.', 'CALL_EXPIRED');
+    }
+    if (
+      call.accepted_device_session_id &&
+      call.accepted_device_session_id !== auth.sessionId
+    ) {
+      throw new AppError(409, 'This call was answered on another device.', 'CALL_ANSWERED_ELSEWHERE');
+    }
+    if (
+      call.accepted_device_session_id !== auth.sessionId ||
+      !['connecting', 'connected'].includes(call.state)
+    ) {
+      throw new AppError(409, 'Call is no longer available to answer.', 'CALL_ENDED');
+    }
+
+    this.notifyLiveKitAccepted(auth, call, newlyAccepted);
+    return call;
+  }
+
+  async acceptLiveKitCall(auth: RelayAuthContext, input: LiveKitTokenInput) {
+    await this.persistLiveKitAcceptance(auth, input);
+    return this.createLiveKitToken(auth, input);
+  }
+
+  async createLiveKitToken(auth: RelayAuthContext, input: LiveKitTokenInput) {
+    const liveKit = this.requireLiveKitConfig();
+    const callResult = await pool.query<{
+      call_id: string;
+      mode: CallMode;
+      caller_user_id: string;
+      caller_device_session_id: string;
+      recipient_user_id: string;
+      accepted_device_session_id: string | null;
+      room_name: string | null;
+      state: string;
+      expires_at: string;
+    }>(
+      `
+        select
+          call_id,
+          mode,
+          caller_user_id,
+          caller_device_session_id,
+          recipient_user_id,
+          accepted_device_session_id,
+          room_name,
+          state,
+          expires_at
+        from call_sessions
+        where call_id = $1
+        limit 1
+      `,
+      [input.callId]
+    );
+    const call = callResult.rows[0];
+    if (!call || new Date(call.expires_at).getTime() <= Date.now()) {
+      throw new AppError(404, 'Call is no longer available.', 'CALL_NOT_FOUND');
+    }
+    if (!['ringing', 'connecting', 'connected'].includes(call.state)) {
+      throw new AppError(409, 'Call has already ended.', 'CALL_ENDED');
+    }
+
+    const isCaller = call.caller_user_id === auth.userId;
+    const isRecipient = call.recipient_user_id === auth.userId;
+    if (!isCaller && !isRecipient) {
+      throw new AppError(403, 'You are not a participant in this call.', 'CALL_ACCESS_DENIED');
+    }
+    if (isCaller && call.caller_device_session_id !== auth.sessionId) {
+      throw new AppError(403, 'This call belongs to another device.', 'CALL_DEVICE_MISMATCH');
+    }
+    if (isCaller && call.state === 'ringing') {
+      throw new AppError(409, 'Waiting for the recipient to answer.', 'CALL_NOT_ACCEPTED');
+    }
+    if (isRecipient && (call.accepted_device_session_id !== auth.sessionId ||
+        !['connecting', 'connected'].includes(call.state))) {
+      throw new AppError(403, 'Accept this call on this device before joining.', 'CALL_NOT_ACCEPTED');
+    }
+
+    const roomName = normalizeLiveKitRoomName(call.room_name ?? undefined);
+    if (!roomName) {
+      throw new AppError(503, 'Managed call room is unavailable.', 'CALL_ROOM_UNAVAILABLE');
+    }
+
+    const participantName = await this.resolveUsername(auth.userId);
+    const participantIdentity = `${auth.userId}:${auth.sessionId}`;
+
+    logCallEvent('livekit_token_requested', {
+      callId: call.call_id,
+      userId: auth.userId,
+      sessionId: auth.sessionId,
+      mode: call.mode,
+      roomName
+    });
+
     const token = new AccessToken(liveKit.apiKey, liveKit.apiSecret, {
       identity: participantIdentity,
-      name: callerUsername,
+      name: participantName,
       ttl: LIVEKIT_TOKEN_TTL_SECONDS,
       metadata: JSON.stringify({
+        callId: call.call_id,
         userId: auth.userId,
         sessionId: auth.sessionId,
-        mode: input.mode
+        mode: call.mode
       })
     });
 
@@ -471,11 +754,11 @@ export class CallsService {
       url: liveKit.url,
       token: await token.toJwt(),
       roomName,
-      mode: input.mode,
+      mode: call.mode,
       participantIdentity,
-      participantName: callerUsername,
-      recipientUserId: recipient?.id ?? null,
-      recipientUsername: recipient?.username ?? null,
+      participantName,
+      recipientUserId: call.recipient_user_id,
+      recipientUsername: null,
       expiresInSeconds: LIVEKIT_TOKEN_TTL_SECONDS,
       e2eeRequired: false
     };
@@ -532,10 +815,43 @@ export class CallsService {
   }
 
   private async startCall(auth: RelayAuthContext, command: CallInviteCommand) {
+    if (!CALL_ID_PATTERN.test(command.callId) ||
+        !['audio', 'video'].includes(command.mode) ||
+        typeof command.recipientLookup !== 'string' ||
+        command.recipientLookup.trim().length < 3) {
+      relayService.sendEventToSession(auth.sessionId, {
+        type: 'call_unavailable',
+        callId: command.callId,
+        reason: 'Call request is invalid.'
+      });
+      return;
+    }
+    if (this.callsById.has(command.callId) || this.sessionIsBusy(auth.sessionId)) {
+      relayService.sendEventToSession(auth.sessionId, {
+        type: 'call_unavailable',
+        callId: command.callId,
+        reason: 'You are already in another call.'
+      });
+      return;
+    }
+
+    const mediaProvider = command.mediaProvider === 'livekit' ? 'livekit' : 'webrtc';
+    if (mediaProvider === 'livekit') {
+      try {
+        this.requireLiveKitConfig();
+      } catch {
+        relayService.sendEventToSession(auth.sessionId, {
+          type: 'call_unavailable',
+          callId: command.callId,
+          reason: 'Calling is temporarily unavailable.'
+        });
+        return;
+      }
+    }
+
     const recipient = await this.resolveRecipient(command.recipientLookup);
     const callerUsername = await this.resolveUsername(auth.userId);
-    const mediaProvider = command.mediaProvider === 'livekit' ? 'livekit' : 'webrtc';
-    const roomName = mediaProvider === 'livekit' ? normalizeLiveKitRoomName(command.roomName) : null;
+    const roomName = mediaProvider === 'livekit' ? `kryno-${command.mode}-${command.callId}` : null;
     logCallEvent('invite_received', {
       callId: command.callId,
       callerUserId: auth.userId,
@@ -545,15 +861,6 @@ export class CallsService {
       mediaProvider,
       roomName
     });
-
-    if (mediaProvider === 'livekit' && !roomName) {
-      relayService.sendEventToSession(auth.sessionId, {
-        type: 'call_unavailable',
-        callId: command.callId,
-        reason: 'Managed call room is invalid.'
-      });
-      return;
-    }
 
     if (!recipient) {
       relayService.sendEventToSession(auth.sessionId, {
@@ -602,18 +909,10 @@ export class CallsService {
     }
 
     const expiresAt = new Date(Date.now() + CALL_RING_TIMEOUT_MS);
-    const timeout = setTimeout(() => {
-      const call = this.callsById.get(command.callId);
-      if (!call || call.acceptedSessionId) {
-        return;
-      }
-
-      logCallEvent('ring_timeout', {
-        callId: command.callId,
-        state: call.state
-      });
-      this.endCall(call, 'missed', null);
-    }, CALL_RING_TIMEOUT_MS);
+    const timeout = setTimeout(
+      () => void this.handleRingTimeout(command.callId),
+      CALL_RING_TIMEOUT_MS
+    );
 
     const call: ActiveCall = {
       callId: command.callId,
@@ -631,22 +930,20 @@ export class CallsService {
       timeout
     };
 
+    try {
+      await this.persistCallStart(call);
+    } catch (error) {
+      clearTimeout(timeout);
+      relayService.sendEventToSession(auth.sessionId, {
+        type: 'call_unavailable',
+        callId: command.callId,
+        reason: error instanceof AppError ? error.message : 'Call service is temporarily unavailable.'
+      });
+      return;
+    }
+
     this.callsById.set(call.callId, call);
     this.attachSession(call.callId, auth.sessionId);
-    await this.persistCallStart(call);
-
-    const pushResult = await trySendCallPush({
-      recipientUserId: recipient.id,
-      callerUsername,
-      callId: call.callId,
-      mode: call.mode
-    });
-    logCallEvent('invite_push_result', {
-      callId: call.callId,
-      attempted: pushResult.attempted,
-      sent: pushResult.sent,
-      failed: 'failed' in pushResult ? pushResult.failed : false
-    });
 
     for (const sessionId of invitedSessionIds) {
       this.attachSession(call.callId, sessionId);
@@ -670,8 +967,21 @@ export class CallsService {
       mode: call.mode,
       mediaProvider: call.mediaProvider,
       roomName: call.roomName,
-      pushNotification: pushResult,
       waitingForAppOpen: invitedSessionIds.length === 0
+    });
+
+    void trySendCallPush({
+      recipientUserId: recipient.id,
+      callerUsername,
+      callId: call.callId,
+      mode: call.mode
+    }).then((pushResult) => {
+      logCallEvent('invite_push_result', {
+        callId: call.callId,
+        attempted: pushResult.attempted,
+        sent: pushResult.sent,
+        failed: 'failed' in pushResult ? pushResult.failed : false
+      });
     });
   }
 
@@ -682,18 +992,23 @@ export class CallsService {
       sessionId: auth.sessionId
     });
     const call = this.callsById.get(command.callId);
-    if (!call) {
-      logCallEvent('accept_expired', {
-        callId: command.callId,
-        userId: auth.userId,
-        sessionId: auth.sessionId
-      });
-      relayService.sendEventToSession(auth.sessionId, {
-        type: 'call_ended',
-        callId: command.callId,
-        reason: 'expired',
-        endedBySessionId: null
-      });
+    if (!call || call.mediaProvider === 'livekit') {
+      try {
+        await this.persistLiveKitAcceptance(auth, { callId: command.callId });
+      } catch (error) {
+        logCallEvent('accept_failed', {
+          callId: command.callId,
+          userId: auth.userId,
+          sessionId: auth.sessionId,
+          code: error instanceof AppError ? error.code : 'UNKNOWN'
+        });
+        relayService.sendEventToSession(auth.sessionId, {
+          type: 'call_ended',
+          callId: command.callId,
+          reason: error instanceof AppError ? error.code.toLowerCase() : 'failed',
+          endedBySessionId: null
+        });
+      }
       return;
     }
 
@@ -717,12 +1032,16 @@ export class CallsService {
     }
 
     clearTimeout(call.timeout);
+    const persisted = await this.persistCallState(call, 'connecting', {
+      acceptedSessionId: auth.sessionId
+    });
+    if (!persisted) {
+      this.endCall(call, 'failed', auth.sessionId);
+      return;
+    }
     call.acceptedSessionId = auth.sessionId;
     call.state = 'connecting';
     this.attachSession(call.callId, auth.sessionId);
-    await this.persistCallState(call, 'connecting', {
-      acceptedSessionId: auth.sessionId
-    });
     logCallEvent('accepted', {
       callId: call.callId,
       callerSessionId: call.callerSessionId,

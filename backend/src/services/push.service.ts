@@ -28,7 +28,7 @@ type CallInvitePushInput = {
 type ExpoPushPayload = {
   title: string;
   body: string;
-  channelId: 'kryno-messages' | 'kryno-calls';
+  channelId: 'kryno-messages' | 'kryno-incoming-calls-v3';
   data: Record<string, string>;
   ttlSeconds?: number;
 };
@@ -205,7 +205,7 @@ export class PushService {
       payload: {
         title: `Incoming Kryno ${input.mode} call`,
         body: `${input.callerUsername} is calling you.`,
-        channelId: 'kryno-calls',
+        channelId: 'kryno-incoming-calls-v3',
         ttlSeconds: 45,
         data: {
           type: 'call_invite',
@@ -328,6 +328,7 @@ export class PushService {
     }
 
     const accessToken = await getFirebaseAccessToken(config);
+    const isIncomingCall = payload.channelId === 'kryno-incoming-calls-v3';
     const response = await fetch(`https://fcm.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}/messages:send`, {
       method: 'POST',
       headers: {
@@ -337,23 +338,33 @@ export class PushService {
       body: JSON.stringify({
         message: {
           token: target.push_token,
-          notification: {
-            title: payload.title,
-            body: payload.body
-          },
+          ...(isIncomingCall
+            ? {}
+            : {
+                notification: {
+                  title: payload.title,
+                  body: payload.body
+                }
+              }),
           data: stringifyPushData({
             ...payload.data,
-            channelId: payload.channelId
+            channelId: payload.channelId,
+            title: payload.title,
+            body: payload.body
           }),
           android: {
             priority: 'HIGH',
             ttl: `${payload.ttlSeconds ?? 3600}s`,
-            notification: {
-              channel_id: payload.channelId,
-              sound: 'default',
-              default_vibrate_timings: true,
-              visibility: payload.channelId === 'kryno-calls' ? 'PUBLIC' : 'PRIVATE'
-            }
+            ...(isIncomingCall
+              ? {}
+              : {
+                  notification: {
+                    channel_id: payload.channelId,
+                    sound: 'default',
+                    default_vibrate_timings: true,
+                    visibility: 'PRIVATE'
+                  }
+                })
           }
         }
       })

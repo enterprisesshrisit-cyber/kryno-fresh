@@ -3,7 +3,9 @@ import Constants from 'expo-constants';
 import * as Notifications from 'expo-notifications';
 
 const MESSAGE_CHANNEL_ID = 'kryno-messages';
-const CALL_CHANNEL_ID = 'kryno-calls';
+// Remote incoming calls use a native-only channel so Android receives ringtone
+// audio attributes before any Expo notification can create the channel.
+const CALL_CHANNEL_ID = 'kryno-call-alerts-local-v1';
 
 type RegisteredPushToken = {
   provider: 'expo' | 'fcm';
@@ -49,7 +51,7 @@ export async function configureKrynoNotifications() {
     });
 
     await Notifications.setNotificationChannelAsync(CALL_CHANNEL_ID, {
-      name: 'Kryno calls',
+      name: 'Incoming Kryno calls',
       importance: Notifications.AndroidImportance.MAX,
       vibrationPattern: [0, 500, 180, 500, 180, 500],
       lightColor: '#EC4899',

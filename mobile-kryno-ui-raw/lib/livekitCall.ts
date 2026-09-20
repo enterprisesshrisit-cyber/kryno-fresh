@@ -1,7 +1,18 @@
-import { AudioSession } from '@livekit/react-native';
+import { AudioSession, registerGlobals } from '@livekit/react-native';
 import { ConnectionState, Room, RoomEvent } from 'livekit-client';
 import type { RemoteParticipant, RemoteTrack, RemoteTrackPublication } from 'livekit-client';
 import type { MobileCallMode } from './mobileCall';
+
+let liveKitGlobalsRegistered = false;
+
+function ensureLiveKitGlobals() {
+  if (liveKitGlobalsRegistered) {
+    return;
+  }
+
+  registerGlobals();
+  liveKitGlobalsRegistered = true;
+}
 
 type ConnectLiveKitCallInput = {
   url: string;
@@ -9,6 +20,11 @@ type ConnectLiveKitCallInput = {
   mode: MobileCallMode;
   onConnectionStateChange?: (state: ConnectionState) => void;
   onRemoteTrackSubscribed?: (
+    track: RemoteTrack,
+    publication: RemoteTrackPublication,
+    participant: RemoteParticipant
+  ) => void;
+  onRemoteTrackUnsubscribed?: (
     track: RemoteTrack,
     publication: RemoteTrackPublication,
     participant: RemoteParticipant
@@ -24,6 +40,8 @@ export type KrynoLiveKitCallSession = {
 };
 
 export async function connectKrynoLiveKitCall(input: ConnectLiveKitCallInput): Promise<KrynoLiveKitCallSession> {
+  ensureLiveKitGlobals();
+
   const room = new Room({
     adaptiveStream: true,
     dynacast: true
@@ -35,6 +53,10 @@ export async function connectKrynoLiveKitCall(input: ConnectLiveKitCallInput): P
 
   room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
     input.onRemoteTrackSubscribed?.(track, publication, participant);
+  });
+
+  room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+    input.onRemoteTrackUnsubscribed?.(track, publication, participant);
   });
 
   room.on(RoomEvent.Disconnected, () => {

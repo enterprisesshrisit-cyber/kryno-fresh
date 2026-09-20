@@ -17,6 +17,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import KrynoLogo from '../components/KrynoLogo';
 import { COLORS, FONTS, GRADIENTS, RADIUS, SPACE } from '../lib/theme';
 import { useKrynoBackend } from '../lib/krynoBackend';
+import { passwordResetRequestNotice, resendVerificationNotice } from '../lib/authEmailFeedback';
 
 type AuthMode = 'login' | 'signup' | 'verify' | 'reset';
 
@@ -105,7 +106,7 @@ export default function AuthScreen() {
         result.verificationCodePreview
           ? `Account created. Development verification code: ${result.verificationCodePreview}`
           : !result.verificationEmailSent
-            ? 'Account created, but email delivery failed. Please use Resend code after SMTP is fixed.'
+            ? 'Account created, but the verification email could not be sent. Please try Resend code in a moment.'
           : 'Account created. Check your email for the verification code.'
       );
     } catch (submitError) {
@@ -140,13 +141,7 @@ export default function AuthScreen() {
 
     try {
       const result = await resendVerification(verificationEmail);
-      setNotice(
-        result.verificationCodePreview
-          ? `New code sent. Development preview: ${result.verificationCodePreview}`
-          : !result.verificationEmailSent
-            ? 'Verification code was created, but email delivery failed. Please try again after SMTP is fixed.'
-          : 'A fresh verification code has been sent.'
-      );
+      setNotice(resendVerificationNotice(result.verificationCodePreview));
     } catch (submitError) {
       setLocalError(submitError instanceof Error ? submitError.message : 'Unable to resend verification code.');
     }
@@ -162,13 +157,7 @@ export default function AuthScreen() {
 
     try {
       const result = await requestPasswordReset(resetForm.email);
-      setNotice(
-        result.resetCodePreview
-          ? `Reset code sent. Development preview: ${result.resetCodePreview}`
-          : !result.resetEmailSent
-            ? 'Reset code was created, but email delivery failed. Please try again after SMTP is fixed.'
-          : 'Password reset code sent to your email.'
-      );
+      setNotice(passwordResetRequestNotice(result.resetCodePreview));
     } catch (submitError) {
       setLocalError(submitError instanceof Error ? submitError.message : 'Unable to send reset code.');
     }

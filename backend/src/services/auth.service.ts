@@ -646,9 +646,12 @@ export class AuthService {
 
     const verificationEmailSent = await emailService.sendVerificationEmail(user.email, verificationCode);
 
+    if (!verificationEmailSent) {
+      console.error('[VERIFICATION_RESEND_UNAVAILABLE]');
+    }
+
     return {
       success: true,
-      verificationEmailSent,
       verificationCodePreview:
         env.APP_ENV === 'development' && env.ALLOW_DEV_EMAIL_TOKEN_PREVIEW ? verificationCode : undefined
     };
@@ -684,9 +687,12 @@ export class AuthService {
     const resetCode = await withTransaction(async (client) => createPasswordResetCode(client, user.id));
     const resetEmailSent = await emailService.sendPasswordResetEmail(user.email, resetCode);
 
+    if (!resetEmailSent) {
+      console.error('[PASSWORD_RESET_EMAIL_UNAVAILABLE]');
+    }
+
     return {
       success: true,
-      resetEmailSent,
       resetCodePreview:
         env.APP_ENV === 'development' && env.ALLOW_DEV_EMAIL_TOKEN_PREVIEW ? resetCode : undefined
     };

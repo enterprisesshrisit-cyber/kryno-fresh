@@ -9,6 +9,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   createAudioPlayer,
   RecordingPresets,
@@ -27,6 +28,7 @@ const QUICK_EMOJIS = ['😀', '😂', '😍', '🔥', '👏', '❤️', '🙏', 
 
 type MessageStatus = 'sending' | 'sent' | 'delivered' | 'seen' | 'failed' | 'received';
 type AttachmentKind = 'voice' | 'image' | 'video' | 'file';
+type ChatVibeType = 'silent' | 'lofi_pulse' | 'rain_room' | 'neon_night';
 
 function statusLabel(status?: MessageStatus) {
   switch (status) {
@@ -84,6 +86,13 @@ const CHAT_THEMES: { id: ChatThemeType; label: string; icon: string; accent: str
 ];
 
 // ─── MENU ITEMS ───────────────────────────────────────────────────────────────
+const CHAT_VIBES: { id: ChatVibeType; label: string; detail: string; icon: string; accent: string }[] = [
+  { id: 'silent', label: 'Silent', detail: 'No ambient vibe', icon: 'OFF', accent: '#94A3B8' },
+  { id: 'lofi_pulse', label: 'Lofi Pulse', detail: 'Soft private-room energy', icon: 'LP', accent: '#8B5CF6' },
+  { id: 'rain_room', label: 'Rain Room', detail: 'Calm late-night chat mood', icon: 'RR', accent: '#06B6D4' },
+  { id: 'neon_night', label: 'Neon Night', detail: 'Bright social glow', icon: 'NN', accent: '#EC4899' },
+];
+
 type MenuItem = {
   id: string;
   icon: string;
@@ -98,6 +107,8 @@ const MENU_PRIMARY: MenuItem[] = [
   { id: 'mute',    icon: '🔕', label: 'Mute Notifications', toggle: true },
   { id: 'private', icon: '🔒', label: 'Private Chat Mode',  toggle: true },
 ];
+
+MENU_PRIMARY.push({ id: 'vibe', icon: 'V', label: 'Chat Music / Vibe' });
 
 const MENU_DESTRUCTIVE: MenuItem[] = [
   { id: 'block', icon: '🚫', label: 'Block User', destructive: true },
@@ -165,6 +176,69 @@ function ThemeSheet({
 }
 
 // ─── PREMIUM POPUP MENU ───────────────────────────────────────────────────────
+function VibeSheet({
+  visible,
+  current,
+  onSelect,
+  onClose,
+}: {
+  visible: boolean;
+  current: ChatVibeType;
+  onSelect: (vibe: ChatVibeType) => void;
+  onClose: () => void;
+}) {
+  const slideY = useRef(new Animated.Value(400)).current;
+  const bgOpacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (visible) {
+      Animated.parallel([
+        Animated.spring(slideY, { toValue: 0, useNativeDriver: true, tension: 72, friction: 12 }),
+        Animated.timing(bgOpacity, { toValue: 1, duration: 260, useNativeDriver: true }),
+      ]).start();
+    } else {
+      Animated.parallel([
+        Animated.timing(slideY, { toValue: 400, duration: 220, useNativeDriver: true }),
+        Animated.timing(bgOpacity, { toValue: 0, duration: 220, useNativeDriver: true }),
+      ]).start();
+    }
+  }, [bgOpacity, slideY, visible]);
+
+  return (
+    <Modal transparent visible={visible} onRequestClose={onClose} animationType="none">
+      <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.5)', opacity: bgOpacity }]}>
+        <TouchableWithoutFeedback onPress={onClose}><View style={StyleSheet.absoluteFill} /></TouchableWithoutFeedback>
+      </Animated.View>
+      <Animated.View style={[styles.sheet, { transform: [{ translateY: slideY }] }]}>
+        <LinearGradient colors={['rgba(12,15,28,0.99)', 'rgba(6,8,18,1)']} style={styles.sheetInner}>
+          <View style={styles.sheetHandle} />
+          <Text style={styles.sheetTitle}>Chat Music / Vibe</Text>
+          <Text style={styles.sheetSub}>Choose a saved conversation mood. Audio playback is not exposed until the music engine is ready.</Text>
+          <View style={styles.vibeList}>
+            {CHAT_VIBES.map((vibe) => (
+              <TouchableOpacity
+                key={vibe.id}
+                onPress={() => { onSelect(vibe.id); onClose(); }}
+                activeOpacity={0.82}
+                style={[styles.vibeItem, current === vibe.id && { borderColor: vibe.accent + 'AA', backgroundColor: vibe.accent + '14' }]}
+              >
+                <View style={[styles.vibeIcon, { borderColor: vibe.accent + '77', backgroundColor: vibe.accent + '20' }]}>
+                  <Text style={[styles.vibeIconText, { color: vibe.accent }]}>{vibe.icon}</Text>
+                </View>
+                <View style={styles.vibeTextWrap}>
+                  <Text style={[styles.vibeLabel, current === vibe.id && { color: vibe.accent }]}>{vibe.label}</Text>
+                  <Text style={styles.vibeDetail}>{vibe.detail}</Text>
+                </View>
+                {current === vibe.id && <Ionicons name="checkmark-circle" size={18} color={vibe.accent} />}
+              </TouchableOpacity>
+            ))}
+          </View>
+        </LinearGradient>
+      </Animated.View>
+    </Modal>
+  );
+}
+
 function MenuPopup({
   visible,
   toggleStates,
@@ -725,13 +799,16 @@ export default function ChatScreen({ route, navigation }: any) {
   const recipientLookup = convo.recipientLookup || convo.user?.handle?.replace(/^@/, '') || conversationKey;
   const liveMessages = getConversationMessages(conversationKey);
   const bottomInputInset = Math.max(insets.bottom, Platform.OS === 'android' ? 34 : 10);
+  const vibeStorageKey = `kryno.chat.vibe.${conversationKey}`;
 
   const [messages,       setMessages]       = useState(liveMessages);
   const [input,          setInput]          = useState('');
   const [typing,         setTyping]         = useState(false);
   const [chatTheme,      setChatTheme]      = useState<ChatThemeType>('dark_glass');
+  const [chatVibe,       setChatVibe]       = useState<ChatVibeType>('silent');
   const [showMenu,       setShowMenu]       = useState(false);
   const [showThemeSheet, setShowThemeSheet] = useState(false);
+  const [showVibeSheet,  setShowVibeSheet]  = useState(false);
   const [showEmojiTray,  setShowEmojiTray]  = useState(false);
   const [composerBusy,   setComposerBusy]   = useState(false);
   const [toggleStates,   setToggleStates]   = useState<Record<string, boolean>>({
@@ -744,6 +821,7 @@ export default function ChatScreen({ route, navigation }: any) {
 
   const applyConversationSettings = useCallback((settings: {
     themeId: string;
+    vibeId?: string;
     muted: boolean;
     focusMode: boolean;
     privateMode: boolean;
@@ -762,6 +840,9 @@ export default function ChatScreen({ route, navigation }: any) {
     if (CHAT_THEMES.some((theme) => theme.id === settings.themeId)) {
       setChatTheme(settings.themeId as ChatThemeType);
     }
+    if (settings.vibeId && CHAT_VIBES.some((vibe) => vibe.id === settings.vibeId)) {
+      setChatVibe(settings.vibeId as ChatVibeType);
+    }
   }, []);
 
   useEffect(() => {
@@ -772,6 +853,13 @@ export default function ChatScreen({ route, navigation }: any) {
           return;
         }
         applyConversationSettings(settings);
+        return AsyncStorage.getItem(vibeStorageKey);
+      })
+      .then((storedVibe) => {
+        if (cancelled || !storedVibe || !CHAT_VIBES.some((vibe) => vibe.id === storedVibe)) {
+          return;
+        }
+        setChatVibe(storedVibe as ChatVibeType);
       })
       .catch((error) => {
         console.log('[KrynoChat] settings load failed', {
@@ -783,11 +871,12 @@ export default function ChatScreen({ route, navigation }: any) {
     return () => {
       cancelled = true;
     };
-  }, [applyConversationSettings, conversationKey, getConversationSettings, recipientLookup]);
+  }, [applyConversationSettings, conversationKey, getConversationSettings, recipientLookup, vibeStorageKey]);
 
   const flatRef = useRef<FlatList>(null);
   const tierCfg = TIER[convo.user.tier as keyof typeof TIER] || TIER['Inner Circle'];
   const moodCfg = MOOD[convo.user.mood as keyof typeof MOOD] || MOOD.chill;
+  const activeVibe = CHAT_VIBES.find((vibe) => vibe.id === chatVibe) ?? CHAT_VIBES[0];
 
   useEffect(() => {
     setMessages(liveMessages);
@@ -822,10 +911,29 @@ export default function ChatScreen({ route, navigation }: any) {
       });
   }, [applyConversationSettings, chatTheme, recipientLookup, updateConversationSettings]);
 
+  const handleVibeSelect = useCallback((vibe: ChatVibeType) => {
+    setChatVibe(vibe);
+    void AsyncStorage.setItem(vibeStorageKey, vibe);
+    void updateConversationSettings(recipientLookup, { vibeId: vibe })
+      .then(applyConversationSettings)
+      .catch((error) => {
+        console.log('[KrynoChat] backend vibe save failed; kept local vibe', {
+          conversationKey,
+          message: safeComposerError(error, 'Unable to save this chat vibe right now.')
+        });
+      });
+  }, [applyConversationSettings, conversationKey, recipientLookup, updateConversationSettings, vibeStorageKey]);
+
   const handleMenuAction = useCallback((id: string) => {
     if (id === 'theme') {
       setShowMenu(false);
       setTimeout(() => setShowThemeSheet(true), 220);
+      return;
+    }
+
+    if (id === 'vibe') {
+      setShowMenu(false);
+      setTimeout(() => setShowVibeSheet(true), 220);
       return;
     }
 
@@ -1187,6 +1295,14 @@ export default function ChatScreen({ route, navigation }: any) {
             <Text style={styles.focusBannerText}>Focus Mode — notifications paused</Text>
           </View>
         )}
+        {chatVibe !== 'silent' && (
+          <View style={[styles.vibeBanner, { borderBottomColor: activeVibe.accent + '33', backgroundColor: activeVibe.accent + '12' }]}>
+            <View style={[styles.vibeBannerDot, { backgroundColor: activeVibe.accent }]} />
+            <Text style={[styles.vibeBannerText, { color: activeVibe.accent }]}>
+              {activeVibe.label} vibe saved for this chat
+            </Text>
+          </View>
+        )}
 
         {/* ── MESSAGES ── */}
         <KeyboardAvoidingView
@@ -1344,6 +1460,14 @@ export default function ChatScreen({ route, navigation }: any) {
         onSelect={handleThemeSelect}
         onClose={() => setShowThemeSheet(false)}
       />
+
+      {/* Vibe picker sheet */}
+      <VibeSheet
+        visible={showVibeSheet}
+        current={chatVibe}
+        onSelect={handleVibeSelect}
+        onClose={() => setShowVibeSheet(false)}
+      />
     </View>
   );
 }
@@ -1434,6 +1558,13 @@ const styles = StyleSheet.create({
   },
   focusBannerDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: COLORS.primary },
   focusBannerText: { fontSize: FONTS.xs, color: COLORS.primary, fontWeight: FONTS.medium, letterSpacing: 0.2 },
+  vibeBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: SPACE.md, paddingVertical: 7,
+    borderBottomWidth: 1,
+  },
+  vibeBannerDot: { width: 5, height: 5, borderRadius: 3 },
+  vibeBannerText: { fontSize: FONTS.xs, fontWeight: FONTS.medium, letterSpacing: 0.2 },
 
   // ── Messages ────────────────────────────────────────────────────────────────
   messagesList: {
@@ -1814,5 +1945,42 @@ const styles = StyleSheet.create({
     position: 'absolute', top: 10, right: 10,
     width: 18, height: 18, borderRadius: 9,
     alignItems: 'center', justifyContent: 'center',
+  },
+  vibeList: { gap: 10 },
+  vibeItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    minHeight: 62,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(255,255,255,0.035)',
+  },
+  vibeIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  vibeIconText: {
+    fontSize: FONTS.xs,
+    fontWeight: FONTS.black,
+    letterSpacing: 0.2,
+  },
+  vibeTextWrap: { flex: 1 },
+  vibeLabel: {
+    fontSize: FONTS.base,
+    color: COLORS.text,
+    fontWeight: FONTS.semibold,
+  },
+  vibeDetail: {
+    marginTop: 2,
+    fontSize: FONTS.xs,
+    color: COLORS.textMuted,
   },
 });

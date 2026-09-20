@@ -6,6 +6,7 @@ Render is acceptable for free-first staging. The free web service can sleep afte
 
 - Service name: `kryno-api-staging`
 - Public URL target: `https://kryno-api-staging.onrender.com`
+- Current status: live, `/api/health` and `/api/ready` reachable, but `/api/health` currently reports `environment=development`. Fix `APP_ENV=production` on the hosted service, redeploy, then rerun the staging security check.
 - Runtime: Node
 - Region: Singapore
 - Root directory: `backend`
@@ -30,8 +31,8 @@ JWT_REFRESH_SECRET=
 OTP_PEPPER=
 EMAIL_FROM=verify.kryno@gmail.com
 SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
-SMTP_SECURE=true
+SMTP_PORT=587
+SMTP_SECURE=false
 SMTP_PASS=
 SMTP_USER=verify.kryno@gmail.com
 SECURITY_ALERT_EMAIL=verify.kryno@gmail.com
@@ -106,6 +107,7 @@ https://kryno-api-staging.onrender.com/api/ready
 ```powershell
 cd C:\Users\ankit\Downloads\movies\Balti\project\kryno-fresh\backend
 $env:APP_BASE_URL="https://kryno-api-staging.onrender.com"
+$env:NODE_OPTIONS="--use-system-ca"
 npm.cmd run security:staging-check
 ```
 
@@ -113,4 +115,5 @@ npm.cmd run security:staging-check
 
 - Render Free is fine for staging, but sleeping services may make first requests slow.
 - Rotate all secrets before paid public launch because several staging values were shared during setup.
-- If Gmail SMTP fails on Render with TLS verification, set `SMTP_TLS_REJECT_UNAUTHORIZED=false` for staging only and plan to move to a transactional provider before launch.
+- Gmail should use port `587` with `SMTP_SECURE=false` so Nodemailer negotiates STARTTLS. The backend resolves `SMTP_HOST` to IPv4 before connecting to avoid Render/Gmail IPv6 timeouts.
+- If Gmail returns `535 Username and Password not accepted`, replace `SMTP_PASS` with a fresh 16-character Gmail app password for `verify.kryno@gmail.com`. Remove spaces before saving it in Render.

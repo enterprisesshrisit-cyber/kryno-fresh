@@ -97,7 +97,15 @@ function StoryBubble({
   };
 
   return (
-    <TouchableOpacity onPress={press} activeOpacity={1} style={styles.storyWrap} disabled={disabled}>
+    <TouchableOpacity
+      onPress={press}
+      activeOpacity={0.88}
+      style={[styles.storyWrap, story?.isAdd && disabled && styles.storyWrapDisabled]}
+      disabled={story?.isAdd && disabled}
+      hitSlop={{ top: 6, right: 8, bottom: 8, left: 8 }}
+      accessibilityRole="button"
+      accessibilityLabel={story?.isAdd ? 'Add story' : `Open ${storyLabel} story`}
+    >
       <Animated.View style={{ transform: [{ scale }] }}>
         <LinearGradient
           colors={storyGradient as any}
@@ -197,7 +205,14 @@ function FeedCard({
             <Text style={styles.cardHandle}>{post.user.handle} · {post.timeAgo}</Text>
           </View>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.cardMore} onPress={() => onOpenMenu(post)} activeOpacity={0.8}>
+        <TouchableOpacity
+          style={styles.cardMore}
+          onPress={() => onOpenMenu(post)}
+          activeOpacity={0.8}
+          hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+          accessibilityRole="button"
+          accessibilityLabel="Post options"
+        >
           <Ionicons name="ellipsis-horizontal" size={18} color={COLORS.textMuted} />
         </TouchableOpacity>
       </View>
@@ -260,7 +275,14 @@ function FeedCard({
       {/* Actions — appear on interaction */}
       <Animated.View style={[styles.cardActions, { opacity: showActions || !focusMode ? 1 : 0 }]}>
         <View style={styles.actionsLeft}>
-          <TouchableOpacity onPress={handleLike} style={styles.actionBtn} activeOpacity={0.8}>
+          <TouchableOpacity
+            onPress={handleLike}
+            style={styles.actionBtn}
+            activeOpacity={0.8}
+            hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel="Like post"
+          >
             <Animated.View style={{ transform: [{ scale: likeScale }] }}>
               <Ionicons
                 name={liked ? 'heart' : 'heart-outline'}
@@ -270,12 +292,26 @@ function FeedCard({
             </Animated.View>
             {!post.locked && <Text style={[styles.actionCount, liked && { color: COLORS.pink }]}>{likes}</Text>}
           </TouchableOpacity>
-          <TouchableOpacity style={styles.actionBtn} activeOpacity={0.8} onPress={() => onOpenComments(post)}>
+          <TouchableOpacity
+            style={styles.actionBtn}
+            activeOpacity={0.8}
+            onPress={() => onOpenComments(post)}
+            hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel="Open comments"
+          >
             <Ionicons name="chatbubble-outline" size={19} color={COLORS.textMuted} />
             {!post.locked && <Text style={styles.actionCount}>{post.comments}</Text>}
           </TouchableOpacity>
         </View>
-        <TouchableOpacity style={styles.actionBtn} activeOpacity={0.8} onPress={() => onSharePost(post)}>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          activeOpacity={0.8}
+          onPress={() => onSharePost(post)}
+          hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+          accessibilityRole="button"
+          accessibilityLabel="Share post"
+        >
           <Ionicons name="paper-plane-outline" size={19} color={COLORS.textMuted} />
         </TouchableOpacity>
       </Animated.View>
@@ -483,7 +519,14 @@ export default function FeedScreen() {
             <Ionicons name={focusMode ? 'eye-off-outline' : 'eye-outline'} size={16} color={focusMode ? COLORS.primary : COLORS.textMuted} />
             <Text style={[styles.focusBtnText, focusMode && { color: COLORS.primary }]}>Focus</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.headerIconBtn} onPress={pickPostMedia} disabled={postBusy}>
+          <TouchableOpacity
+            style={[styles.headerIconBtn, postBusy && styles.headerIconBtnDisabled]}
+            onPress={pickPostMedia}
+            disabled={postBusy}
+            hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel="Create post"
+          >
             <Ionicons name={postBusy ? 'cloud-upload-outline' : 'add'} size={22} color={COLORS.textSub} />
           </TouchableOpacity>
         </View>
@@ -721,7 +764,15 @@ const styles = StyleSheet.create({
   },
   focusBtnActive: { backgroundColor: COLORS.primarySoft, borderColor: 'rgba(99,102,241,0.35)' },
   focusBtnText: { fontSize: FONTS.xs, color: COLORS.textMuted, fontWeight: FONTS.medium },
-  headerIconBtn: { position: 'relative', padding: 4 },
+  headerIconBtn: {
+    position: 'relative',
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  headerIconBtnDisabled: { opacity: 0.68 },
   notifDot: {
     position: 'absolute', top: 4, right: 4,
     width: 7, height: 7, borderRadius: 4,
@@ -731,7 +782,8 @@ const styles = StyleSheet.create({
   // Stories
   storiesSection: { paddingBottom: SPACE.md },
   storiesContent: { paddingHorizontal: SPACE.md, gap: 14 },
-  storyWrap: { alignItems: 'center', gap: 6 },
+  storyWrap: { alignItems: 'center', gap: 6, minWidth: 78, minHeight: 98, justifyContent: 'center' },
+  storyWrapDisabled: { opacity: 0.72 },
   storyRing: { width: 68, height: 68, borderRadius: 34, padding: 2.5, alignItems: 'center', justifyContent: 'center' },
   storyInner: { width: 60, height: 60, borderRadius: 30, backgroundColor: COLORS.bgMid, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
   storyAdd: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
@@ -798,7 +850,7 @@ const styles = StyleSheet.create({
   tierPill: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: RADIUS.full, borderWidth: 1 },
   tierPillText: { fontSize: 10, fontWeight: FONTS.bold, letterSpacing: 0.3 },
   cardHandle: { fontSize: FONTS.xs, color: COLORS.textMuted, marginTop: 2 },
-  cardMore: { padding: 4 },
+  cardMore: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 16 },
 
   // Image
   cardImageWrap: { position: 'relative', height: width - SPACE.md * 2 - 2 },
@@ -830,7 +882,7 @@ const styles = StyleSheet.create({
   // Actions
   cardActions: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: SPACE.md, paddingVertical: 12 },
   actionsLeft: { flexDirection: 'row', gap: 18 },
-  actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  actionBtn: { minWidth: 48, minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 },
   actionCount: { fontSize: FONTS.sm, color: COLORS.textMuted, fontWeight: FONTS.medium },
 
   // Comments and menu

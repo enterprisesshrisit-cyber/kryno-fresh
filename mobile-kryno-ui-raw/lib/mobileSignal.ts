@@ -11,6 +11,7 @@ import {
   type MessageType,
 } from '@privacyresearch/libsignal-protocol-typescript';
 import { fromBase64, SecureSignalStore, toBase64 } from './mobileSignalSecureStore';
+import { connectAuthenticatedRelay } from './relayConnection';
 
 declare const require: (moduleName: string) => unknown;
 
@@ -964,165 +965,28 @@ export function connectMobileDirectRelay(
     getSession?: () => AuthSession | null;
   }
 ) {
-  let disposed = false;
-  let socket: WebSocket | null = null;
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  let open = false;
-  let authenticated = false;
-  const connectionWaiters = new Set<{
-    resolve: (value: boolean) => void;
-    timer: ReturnType<typeof setTimeout>;
-  }>();
-
-  const clearHeartbeat = () => {
-    if (heartbeatTimer !== null) {
-      clearInterval(heartbeatTimer);
-      heartbeatTimer = null;
-    }
-  };
-
-  const isConnected = () => Boolean(socket && open && authenticated && socket.readyState === WebSocket.OPEN);
-
-  const resolveConnectionWaiters = (value: boolean) => {
-    for (const waiter of connectionWaiters) {
-      clearTimeout(waiter.timer);
-      waiter.resolve(value);
-    }
-    connectionWaiters.clear();
-  };
-
-  const getCurrentSession = () => handlers.getSession?.() ?? session;
-
-  const openSocket = async () => {
-    const activeSession = getCurrentSession();
-    await ensureLocalBundle(origin, activeSession, deviceProfile);
-    if (disposed) {
-      return;
-    }
-
-    handlers.onStatus?.('connecting');
-    socket = new WebSocket(buildRelayUrl(origin));
-
-    socket.onopen = () => {
-      open = true;
-      authenticated = false;
-      socket?.send(JSON.stringify({ type: 'auth', accessToken: getCurrentSession().accessToken }));
-      clearHeartbeat();
-      heartbeatTimer = setInterval(() => {
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: 'ping' }));
-        }
-      }, 15000);
-    };
-
-    socket.onmessage = async (event) => {
-      try {
-        const payload = JSON.parse(String(event.data)) as
-          | { type: 'relay_ready'; sessionId: string }
-          | { type: 'relay_error'; message: string }
-          | { type: 'pong' }
-          | { type: 'direct_message'; message: RelayMessageRecord }
-          | RelayCallEvent;
-
-        if (payload.type === 'relay_error') {
-          handlers.onStatus?.('error', 'message' in payload ? payload.message : 'Relay error.');
-          socket?.close();
-          return;
-        }
-
-        if (payload.type === 'relay_ready') {
-          authenticated = true;
-          resolveConnectionWaiters(true);
-          handlers.onStatus?.('connected');
-          return;
-        }
-
-        if (payload.type === 'pong') {
-          return;
-        }
-
-        if (payload.type === 'direct_message') {
-          if (!('message' in payload) || payload.message.encryptedContentType !== 'signal') {
-            return;
-          }
-          const activeSession = getCurrentSession();
-          const localMessage = await processIncomingMessage(origin, activeSession, deviceProfile, payload.message);
-          if (localMessage) {
-            await handlers.onMessage?.(localMessage);
-          }
-          await apiJson(origin, activeSession.accessToken, '/messages/ack', {
-            method: 'POST',
-            body: JSON.stringify({ messageIds: [payload.message.messageId] })
-          });
-          return;
-        }
-
-        await handlers.onCallEvent?.(payload);
-      } catch (error) {
-        handlers.onStatus?.('error', error instanceof Error ? error.message : 'Relay message handling failed.');
-      }
-    };
-
-    socket.onclose = () => {
-      open = false;
-      authenticated = false;
-      clearHeartbeat();
-      if (disposed) {
+  const getCurrentSession = () => handlers.getSession ? handlers.getSession() : session;
+  // Presence/call signaling must not wait for Signal key upload. Inbox processing
+  // still initializes the local bundle before any message encryption/decryption.
+  return connectAuthenticatedRelay({
+    url: buildRelayUrl(origin),
+    getSession: getCurrentSession,
+    onStatus: handlers.onStatus,
+    async onPayload(payload) {
+      const activeSession = getCurrentSession();
+      if (!activeSession) return;
+      if (payload.type === 'direct_message') {
+        if (!payload.message || payload.message.encryptedContentType !== 'signal') return;
+        const localMessage = await processIncomingMessage(origin, activeSession, deviceProfile, payload.message);
+        if (!localMessage || !handlers.onMessage) return;
+        await handlers.onMessage(localMessage);
+        await apiJson(origin, activeSession.accessToken, '/messages/ack', {
+          method: 'POST',
+          body: JSON.stringify({ messageIds: [payload.message.messageId] })
+        });
         return;
       }
-      handlers.onStatus?.('disconnected');
-      reconnectTimer = setTimeout(() => {
-        void openSocket();
-      }, 3000);
-    };
-
-    socket.onerror = () => {
-      open = false;
-      authenticated = false;
-      clearHeartbeat();
-      handlers.onStatus?.('error', 'Direct relay socket error.');
-    };
-  };
-
-  void openSocket();
-
-  return {
-    send(command: ClientRelayCommand) {
-      const activeSocket = socket;
-      if (!activeSocket || !isConnected()) {
-        return false;
-      }
-
-      activeSocket.send(JSON.stringify(command));
-      return true;
-    },
-    waitUntilConnected(timeoutMs = 6500) {
-      if (isConnected()) {
-        return Promise.resolve(true);
-      }
-
-      return new Promise<boolean>((resolve) => {
-        const waiter = {
-          resolve,
-          timer: setTimeout(() => {
-            connectionWaiters.delete(waiter);
-            resolve(false);
-          }, timeoutMs)
-        };
-        connectionWaiters.add(waiter);
-      });
-    },
-    disconnect() {
-      disposed = true;
-      resolveConnectionWaiters(false);
-      if (reconnectTimer !== null) {
-        clearTimeout(reconnectTimer);
-      }
-      clearHeartbeat();
-      if (socket && socket.readyState < WebSocket.CLOSING) {
-        socket.close();
-      }
+      await handlers.onCallEvent?.(payload);
     }
-  };
+  });
 }
