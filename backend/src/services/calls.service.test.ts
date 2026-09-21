@@ -5,6 +5,7 @@ import { env } from '../config/env.js';
 import { pool } from '../db/pool.js';
 import { AppError } from '../utils/errors.js';
 import { callsService } from './calls.service.js';
+import { pushService } from './push.service.js';
 import { relayService } from './relay.service.js';
 
 const callId = '11111111-1111-4111-8111-111111111111';
@@ -54,7 +55,7 @@ test('LiveKit token is scoped to the server-side call room', async (t) => {
   assert.equal(grants.room, result.roomName);
   assert.equal(grants.roomJoin, true);
   assert.equal(claims.sub, `${caller.userId}:${caller.sessionId}`);
-  assert.equal(result.e2eeRequired, false);
+  assert.equal(result.e2eeRequired, true);
 });
 
 test('LiveKit token rejects a third-party user', async (t) => {
@@ -250,4 +251,38 @@ test('LiveKit acceptance rejects a user who is not the recipient', async (t) => 
     callsService.acceptLiveKitCall({ userId: 'outsider', sessionId: 'outsider-device' }, { callId }),
     (error: unknown) => error instanceof AppError && error.code === 'CALL_ACCESS_DENIED'
   );
+});
+
+test('LiveKit end is durable, authorized, and notifies active sessions', async (t) => {
+  const activeCall = {
+    call_id: callId,
+    mode: 'audio' as const,
+    caller_user_id: caller.userId,
+    caller_device_session_id: caller.sessionId,
+    recipient_user_id: recipient.userId,
+    accepted_device_session_id: recipient.sessionId,
+    media_provider: 'livekit' as const,
+    room_name: `kryno-audio-${callId}`,
+    state: 'ended',
+    expires_at: new Date(Date.now() + 60_000).toISOString()
+  };
+  const events: Array<{ sessionId: string; event: Record<string, unknown> }> = [];
+  t.mock.method(relayService, 'listUserSessionIds', () => [recipient.sessionId]);
+  t.mock.method(relayService, 'sendEventToSession', (sessionId: string, event: Record<string, unknown>) => {
+    events.push({ sessionId, event });
+    return true;
+  });
+  t.mock.method(pushService, 'sendCallEndedNotification', async () => ({ attempted: 1, sent: 1 }));
+  t.mock.method(pool, 'query', async (sql: string, params?: unknown[]) => {
+    if (sql.includes('update call_sessions')) {
+      assert.deepEqual(params, [callId, caller.userId, caller.sessionId, 'ended']);
+      return { rows: [activeCall], rowCount: 1 };
+    }
+    throw new Error(`Unexpected query: ${sql}`);
+  });
+
+  const result = await callsService.endLiveKitCall(caller, { callId, reason: 'ended' });
+  assert.deepEqual(result, { ended: true });
+  assert.equal(events.some(({ sessionId, event }) =>
+    sessionId === recipient.sessionId && event.type === 'call_ended' && event.callId === callId), true);
 });

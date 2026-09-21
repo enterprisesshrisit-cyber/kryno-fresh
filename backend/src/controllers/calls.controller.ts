@@ -11,6 +11,17 @@ export const acceptLiveKitCallSchema = z.object({
   call_id: z.uuid()
 }).strict();
 
+export const endLiveKitCallSchema = z.object({
+  call_id: z.uuid(),
+  reason: z.enum(['ended', 'declined', 'cancelled'])
+}).strict();
+
+export async function endLiveKitCallController(request: FastifyRequest, reply: FastifyReply) {
+  const body = endLiveKitCallSchema.parse(request.body);
+  const result = await callsService.endLiveKitCall(request.auth, { callId: body.call_id, reason: body.reason });
+  return reply.code(200).send(result);
+}
+
 function parseUrls(value: string | undefined) {
   return (value ?? '')
     .split(',')

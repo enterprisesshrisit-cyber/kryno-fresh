@@ -213,6 +213,7 @@ export class CallsService {
   }
 
   private broadcastEnded(call: ActiveCall, reason: string, endedBySessionId?: string | null) {
+    this.sendEndedPush(call.recipientUserId, call.callId, reason);
     const participants = new Set<string>([call.callerSessionId, ...call.invitedSessionIds]);
     if (call.acceptedSessionId) {
       participants.add(call.acceptedSessionId);
@@ -221,6 +222,12 @@ export class CallsService {
     for (const sessionId of participants) {
       this.sendEnded(call, sessionId, reason, endedBySessionId);
     }
+  }
+
+  private sendEndedPush(recipientUserId: string, callId: string, reason: string, excludeSessionIds?: string[]) {
+    void pushService.sendCallEndedNotification({ recipientUserId, callId, reason, excludeSessionIds }).catch((error) => {
+      captureException(error, { surface: 'CallsService', reason: 'call_cancel_push_failed', callId });
+    });
   }
 
   private async handleRingTimeout(callId: string) {
@@ -510,6 +517,7 @@ export class CallsService {
     if (!newlyAccepted) {
       return;
     }
+    this.sendEndedPush(call.recipient_user_id, call.call_id, 'answered_elsewhere', [auth.sessionId]);
 
     const activeCall = this.callsById.get(call.call_id);
     if (activeCall) {
@@ -658,6 +666,41 @@ export class CallsService {
     return this.createLiveKitToken(auth, input);
   }
 
+  async endLiveKitCall(auth: RelayAuthContext, input: LiveKitTokenInput & { reason: 'ended' | 'declined' | 'cancelled' }) {
+    // Recheck ownership/device binding atomically against another device accepting.
+    const result = await pool.query<PersistedLiveKitCall>(`
+      update call_sessions set state = $4, end_reason = $4, ended_at = now(), updated_at = now()
+      where call_id = $1 and state in ('ringing', 'connecting', 'connected')
+        and ((caller_user_id = $2 and caller_device_session_id = $3)
+          or (recipient_user_id = $2 and (accepted_device_session_id = $3
+            or (accepted_device_session_id is null and state = 'ringing'))))
+      returning *
+    `, [input.callId, auth.userId, auth.sessionId, input.reason]);
+    const call = result.rows[0];
+    if (!call) {
+      const existing = await pool.query<PersistedLiveKitCall>('select * from call_sessions where call_id = $1', [input.callId]);
+      const row = existing.rows[0];
+      if (!row || (row.caller_user_id !== auth.userId && row.recipient_user_id !== auth.userId)) {
+        throw new AppError(404, 'Call not found.', 'CALL_NOT_FOUND');
+      }
+      if (['ringing', 'connecting', 'connected'].includes(row.state)) {
+        throw new AppError(403, 'This call is active on another device.', 'CALL_DEVICE_MISMATCH');
+      }
+      return { ended: true };
+    }
+    const active = this.callsById.get(input.callId);
+    if (active) {
+      this.broadcastEnded(active, input.reason, auth.sessionId);
+      this.clearCall(active);
+    } else {
+      for (const sessionId of new Set([call.caller_device_session_id, ...relayService.listUserSessionIds(call.recipient_user_id)])) {
+        relayService.sendEventToSession(sessionId, { type: 'call_ended', callId: input.callId, reason: input.reason, endedBySessionId: auth.sessionId });
+      }
+      this.sendEndedPush(call.recipient_user_id, input.callId, input.reason);
+    }
+    return { ended: true };
+  }
+
   async createLiveKitToken(auth: RelayAuthContext, input: LiveKitTokenInput) {
     const liveKit = this.requireLiveKitConfig();
     const callResult = await pool.query<{
@@ -760,7 +803,7 @@ export class CallsService {
       recipientUserId: call.recipient_user_id,
       recipientUsername: null,
       expiresInSeconds: LIVEKIT_TOKEN_TTL_SECONDS,
-      e2eeRequired: false
+      e2eeRequired: true
     };
   }
 

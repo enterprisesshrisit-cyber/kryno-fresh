@@ -492,7 +492,8 @@ export class MessagesService {
       persisted.recipientUserId,
       input.senderUserId
     );
-    const pushResult = notificationPrefs.muted || notificationPrefs.focusMode
+    const isCallControlMessage = input.messageType === 'call_media_key';
+    const pushResult = isCallControlMessage || notificationPrefs.muted || notificationPrefs.focusMode
       ? { attempted: 0, sent: 0, muted: true }
       : await trySendMessagePush(
           persisted.recipientUserId,

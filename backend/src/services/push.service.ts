@@ -28,7 +28,7 @@ type CallInvitePushInput = {
 type ExpoPushPayload = {
   title: string;
   body: string;
-  channelId: 'kryno-messages' | 'kryno-incoming-calls-v3';
+  channelId: 'kryno-messages' | 'kryno-incoming-calls-v4';
   data: Record<string, string>;
   ttlSeconds?: number;
 };
@@ -205,14 +205,26 @@ export class PushService {
       payload: {
         title: `Incoming Kryno ${input.mode} call`,
         body: `${input.callerUsername} is calling you.`,
-        channelId: 'kryno-incoming-calls-v3',
+        channelId: 'kryno-incoming-calls-v4',
         ttlSeconds: 45,
         data: {
           type: 'call_invite',
           callId: input.callId,
           mode: input.mode,
-          callerUsername: input.callerUsername
+          callerUsername: input.callerUsername,
+          expiresAt: String(Date.now() + 60_000)
         }
+      }
+    });
+  }
+
+  async sendCallEndedNotification(input: { recipientUserId: string; callId: string; reason: string; excludeSessionIds?: string[] }) {
+    return this.sendNotificationToUser({
+      recipientUserId: input.recipientUserId,
+      excludeSessionIds: input.excludeSessionIds,
+      payload: {
+        title: '', body: '', channelId: 'kryno-incoming-calls-v4', ttlSeconds: 60,
+        data: { type: 'call_ended', callId: input.callId, reason: input.reason }
       }
     });
   }
@@ -264,6 +276,7 @@ export class PushService {
 
     let sent = 0;
     for (const target of targets) {
+      if (input.payload.data.type === 'call_ended' && target.push_provider !== 'fcm') continue;
       try {
         const delivered = target.push_provider === 'fcm'
           ? await this.sendFcmNotification(target, input.payload)
@@ -328,7 +341,7 @@ export class PushService {
     }
 
     const accessToken = await getFirebaseAccessToken(config);
-    const isIncomingCall = payload.channelId === 'kryno-incoming-calls-v3';
+    const isIncomingCall = payload.channelId === 'kryno-incoming-calls-v4';
     const response = await fetch(`https://fcm.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}/messages:send`, {
       method: 'POST',
       headers: {
