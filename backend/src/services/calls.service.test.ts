@@ -275,7 +275,8 @@ test('LiveKit end is durable, authorized, and notifies active sessions', async (
   t.mock.method(pushService, 'sendCallEndedNotification', async () => ({ attempted: 1, sent: 1 }));
   t.mock.method(pool, 'query', async (sql: string, params?: unknown[]) => {
     if (sql.includes('update call_sessions')) {
-      assert.deepEqual(params, [callId, caller.userId, caller.sessionId, 'ended']);
+      assert.match(sql, /state = \$4, end_reason = \$5/);
+      assert.deepEqual(params, [callId, caller.userId, caller.sessionId, 'ended', 'ended']);
       return { rows: [activeCall], rowCount: 1 };
     }
     throw new Error(`Unexpected query: ${sql}`);

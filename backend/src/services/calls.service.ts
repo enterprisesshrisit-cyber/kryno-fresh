@@ -669,13 +669,13 @@ export class CallsService {
   async endLiveKitCall(auth: RelayAuthContext, input: LiveKitTokenInput & { reason: 'ended' | 'declined' | 'cancelled' }) {
     // Recheck ownership/device binding atomically against another device accepting.
     const result = await pool.query<PersistedLiveKitCall>(`
-      update call_sessions set state = $4, end_reason = $4, ended_at = now(), updated_at = now()
+      update call_sessions set state = $4, end_reason = $5, ended_at = now(), updated_at = now()
       where call_id = $1 and state in ('ringing', 'connecting', 'connected')
         and ((caller_user_id = $2 and caller_device_session_id = $3)
           or (recipient_user_id = $2 and (accepted_device_session_id = $3
             or (accepted_device_session_id is null and state = 'ringing'))))
       returning *
-    `, [input.callId, auth.userId, auth.sessionId, input.reason]);
+    `, [input.callId, auth.userId, auth.sessionId, input.reason, input.reason]);
     const call = result.rows[0];
     if (!call) {
       const existing = await pool.query<PersistedLiveKitCall>('select * from call_sessions where call_id = $1', [input.callId]);
@@ -993,6 +993,7 @@ export class CallsService {
       relayService.sendEventToSession(sessionId, {
         type: 'call_invite',
         callId: call.callId,
+        expiresAt: call.expiresAt.toISOString(),
         mode: call.mode,
         callerSessionId: auth.sessionId,
         callerUserId: auth.userId,
@@ -1005,6 +1006,7 @@ export class CallsService {
     relayService.sendEventToSession(auth.sessionId, {
       type: 'call_ringing',
       callId: call.callId,
+      expiresAt: call.expiresAt.toISOString(),
       recipientUserId: recipient.id,
       recipientUsername: recipient.username,
       mode: call.mode,
