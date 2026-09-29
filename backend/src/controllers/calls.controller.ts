@@ -22,6 +22,11 @@ export async function endLiveKitCallController(request: FastifyRequest, reply: F
   return reply.code(200).send(result);
 }
 
+export async function getLiveKitCallStatusController(request: FastifyRequest, reply: FastifyReply) {
+  const { callId } = z.object({ callId: z.uuid() }).parse(request.params);
+  return reply.code(200).send(await callsService.getLiveKitCallStatus(request.auth, callId));
+}
+
 function parseUrls(value: string | undefined) {
   return (value ?? '')
     .split(',')

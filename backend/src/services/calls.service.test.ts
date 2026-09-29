@@ -287,3 +287,24 @@ test('LiveKit end is durable, authorized, and notifies active sessions', async (
   assert.equal(events.some(({ sessionId, event }) =>
     sessionId === recipient.sessionId && event.type === 'call_ended' && event.callId === callId), true);
 });
+
+test('call status exposes only termination metadata to participants', async (t) => {
+  t.mock.method(pool, 'query', async (sql: string, params?: unknown[]) => {
+    assert.match(sql, /select state, end_reason, caller_user_id, recipient_user_id, connected_at, ended_at/);
+    assert.deepEqual(params, [callId]);
+    return { rows: [{
+      state: 'ended', end_reason: 'ended', caller_user_id: caller.userId,
+      recipient_user_id: recipient.userId, connected_at: '2026-09-29T06:00:00Z',
+      ended_at: '2026-09-29T06:01:00Z'
+    }] };
+  });
+  const status = await callsService.getLiveKitCallStatus(recipient, callId);
+  assert.deepEqual(status, {
+    state: 'ended', endReason: 'ended', connectedAt: '2026-09-29T06:00:00Z',
+    endedAt: '2026-09-29T06:01:00Z'
+  });
+  await assert.rejects(
+    callsService.getLiveKitCallStatus({ userId: 'outsider', sessionId: 'outsider-device' }, callId),
+    (error: unknown) => error instanceof AppError && error.statusCode === 404
+  );
+});

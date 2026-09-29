@@ -701,6 +701,30 @@ export class CallsService {
     return { ended: true };
   }
 
+  async getLiveKitCallStatus(auth: RelayAuthContext, callId: string) {
+    const result = await pool.query<{
+      state: string;
+      end_reason: string | null;
+      caller_user_id: string;
+      recipient_user_id: string;
+      connected_at: string | Date | null;
+      ended_at: string | Date | null;
+    }>(`
+      select state, end_reason, caller_user_id, recipient_user_id, connected_at, ended_at
+      from call_sessions where call_id = $1
+    `, [callId]);
+    const call = result.rows[0];
+    if (!call || (call.caller_user_id !== auth.userId && call.recipient_user_id !== auth.userId)) {
+      throw new AppError(404, 'Call not found.', 'CALL_NOT_FOUND');
+    }
+    return {
+      state: call.state,
+      endReason: call.end_reason,
+      connectedAt: call.connected_at,
+      endedAt: call.ended_at
+    };
+  }
+
   async createLiveKitToken(auth: RelayAuthContext, input: LiveKitTokenInput) {
     const liveKit = this.requireLiveKitConfig();
     const callResult = await pool.query<{
