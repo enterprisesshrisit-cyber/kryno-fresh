@@ -488,19 +488,26 @@ export class MessagesService {
       }
     });
 
-    const notificationPrefs = await this.getRecipientNotificationPrefs(
-      persisted.recipientUserId,
-      input.senderUserId
-    );
     const isCallControlMessage = input.messageType === 'call_media_key';
-    const pushResult = isCallControlMessage || notificationPrefs.muted || notificationPrefs.focusMode
-      ? { attempted: 0, sent: 0, muted: true }
-      : await trySendMessagePush(
+    if (!isCallControlMessage) {
+      void (async () => {
+        const notificationPrefs = await this.getRecipientNotificationPrefs(
           persisted.recipientUserId,
-          persisted.senderUsername,
-          relayResult.deliveredSessionIds,
-          notificationPrefs.privateMode
+          input.senderUserId
         );
+        if (!notificationPrefs.muted && !notificationPrefs.focusMode) {
+          await trySendMessagePush(
+            persisted.recipientUserId,
+            persisted.senderUsername,
+            relayResult.deliveredSessionIds,
+            notificationPrefs.privateMode
+          );
+        }
+      })().catch((error) => captureException(error, {
+        surface: 'MessagesService',
+        reason: 'push_dispatch_failed'
+      }));
+    }
 
     return {
       messageId: persisted.messageId,
@@ -510,7 +517,7 @@ export class MessagesService {
       serverReceivedAt: persisted.serverReceivedAt,
       expiresAt: persisted.expiresAt,
       deliveryMode: relayResult.delivered ? 'live' : 'queued',
-      pushNotification: pushResult
+      pushNotification: { scheduled: !isCallControlMessage }
     };
   }
 

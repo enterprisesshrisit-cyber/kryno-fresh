@@ -16,6 +16,8 @@ afterEach(() => {
 
 test('direct message ciphertext commits before realtime relay', async () => {
   const events: string[] = [];
+  let releaseNotificationPrefs!: () => void;
+  const notificationPrefsReady = new Promise<void>((resolve) => { releaseNotificationPrefs = resolve; });
   const recipientUserId = '22222222-2222-4222-8222-222222222222';
   const recipientSessionId = '33333333-3333-4333-8333-333333333333';
   const senderUserId = '44444444-4444-4444-8444-444444444444';
@@ -79,6 +81,7 @@ test('direct message ciphertext commits before realtime relay', async () => {
       };
     }
     if (normalized.includes('from direct_conversation_settings')) {
+      await notificationPrefsReady;
       return { rows: [{ muted: true, focus_mode: false, private_mode: false }], rowCount: 1 };
     }
     throw new Error(`Unexpected pool query: ${normalized}`);
@@ -90,7 +93,7 @@ test('direct message ciphertext commits before realtime relay', async () => {
   }) as typeof relayService.deliverDirectMessage;
 
   const service = new MessagesService();
-  const result = await service.sendMessage({
+  const send = service.sendMessage({
     messageId,
     senderUserId,
     senderSessionId,
@@ -101,8 +104,20 @@ test('direct message ciphertext commits before realtime relay', async () => {
     encryptedContentType: 'signal',
     clientCreatedAt: '2026-09-19T00:00:00.000Z'
   });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let result: Awaited<typeof send>;
+  try {
+    result = await Promise.race([send, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('Message response waited for notification dispatch')), 1000);
+    })]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    releaseNotificationPrefs();
+    await send;
+  }
 
   assert.equal(result.deliveryMode, 'live');
+  assert.deepEqual(result.pushNotification, { scheduled: true });
   assert.ok(events.indexOf('persist-message') < events.indexOf('commit'));
   assert.ok(events.indexOf('persist-delivery') < events.indexOf('commit'));
   assert.ok(events.indexOf('commit') < events.indexOf('relay'));

@@ -24,6 +24,24 @@ type FetchBundleTarget = {
 };
 
 export class KeysService {
+  async fetchActiveRecipientDevice(target: FetchBundleTarget) {
+    const result = await pool.query<{ device_session_id: string }>(
+      `
+        select skb.device_session_id
+        from signal_key_bundles skb
+        inner join device_sessions ds on ds.id = skb.device_session_id
+        inner join users u on u.id = skb.user_id
+        where (u.id::text = $1 or lower(u.username) = lower($1))
+          and ds.trusted = true
+        order by ds.last_seen_at desc, skb.updated_at desc
+        limit 1
+      `,
+      [target.lookup]
+    );
+
+    return { deviceSessionId: result.rows[0]?.device_session_id ?? null };
+  }
+
   async uploadBundle(input: UploadBundleInput) {
     return withTransaction(async (client) => {
       await client.query(

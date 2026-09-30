@@ -46,3 +46,8 @@ export async function fetchRecipientBundlesController(request: FastifyRequest, r
 
   return reply.code(200).send(result);
 }
+
+export async function fetchActiveRecipientDeviceController(request: FastifyRequest, reply: FastifyReply) {
+  const params = fetchBundleParamsSchema.parse(request.params);
+  return reply.code(200).send(await keysService.fetchActiveRecipientDevice({ lookup: params.lookup }));
+}
