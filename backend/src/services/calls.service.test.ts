@@ -4,7 +4,7 @@ import { decodeJwt } from 'jose';
 import { env } from '../config/env.js';
 import { pool } from '../db/pool.js';
 import { AppError } from '../utils/errors.js';
-import { callsService } from './calls.service.js';
+import { CallsService, callsService } from './calls.service.js';
 import { pushService } from './push.service.js';
 import { relayService } from './relay.service.js';
 
@@ -307,4 +307,70 @@ test('call status exposes only termination metadata to participants', async (t) 
     callsService.getLiveKitCallStatus({ userId: 'outsider', sessionId: 'outsider-device' }, callId),
     (error: unknown) => error instanceof AppError && error.statusCode === 404
   );
+});
+
+for (const endingDevice of [caller, recipient]) {
+  test(`relay hangup by ${endingDevice.userId} survives missing in-memory state and duplicate HTTP`, async (t) => {
+    let ended = false;
+    const call = {
+      call_id: callId, mode: 'audio', caller_user_id: caller.userId,
+      caller_device_session_id: caller.sessionId, recipient_user_id: recipient.userId,
+      accepted_device_session_id: recipient.sessionId, media_provider: 'livekit',
+      room_name: `kryno-audio-${callId}`, state: 'connected'
+    };
+    const events: Array<{ sessionId: string; type: string }> = [];
+    t.mock.method(relayService, 'listUserSessionIds', () => [recipient.sessionId]);
+    t.mock.method(relayService, 'sendEventToSession', (sessionId: string, event: { type: string }) => {
+      events.push({ sessionId, type: event.type });
+      return true;
+    });
+    t.mock.method(pushService, 'sendCallEndedNotification', async () => ({ attempted: 1, sent: 1 }));
+    t.mock.method(pool, 'query', async (sql: string, params?: unknown[]) => {
+      if (sql.includes('update call_sessions')) {
+        assert.match(sql, /accepted_device_session_id = \$3/);
+        assert.deepEqual(params, [callId, endingDevice.userId, endingDevice.sessionId, 'ended', 'ended']);
+        if (ended) return { rows: [] };
+        ended = true;
+        return { rows: [{ ...call, state: 'ended' }] };
+      }
+      if (sql.includes('from call_sessions')) return { rows: [{ ...call, state: 'ended' }] };
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+    await callsService.handleCommand(endingDevice, { type: 'call_end', callId, reason: 'ended' });
+    assert.deepEqual(await callsService.endLiveKitCall(endingDevice, { callId, reason: 'ended' }), { ended: true });
+    assert.deepEqual(events, [
+      { sessionId: caller.sessionId, type: 'call_ended' },
+      { sessionId: recipient.sessionId, type: 'call_ended' }
+    ]);
+  });
+}
+
+test('another recipient device cannot hang up the accepted call through relay', async (t) => {
+  t.mock.method(pool, 'query', async (sql: string) => {
+    if (sql.includes('update call_sessions')) return { rows: [] };
+    return { rows: [{
+      caller_user_id: caller.userId, recipient_user_id: recipient.userId,
+      accepted_device_session_id: recipient.sessionId, state: 'connected'
+    }] };
+  });
+  const broadcast = t.mock.method(relayService, 'sendEventToSession', () => true);
+  await assert.rejects(
+    callsService.handleCommand({ ...recipient, sessionId: 'unaccepted-device' }, { type: 'call_end', callId }),
+    (error: unknown) => error instanceof AppError && error.code === 'CALL_DEVICE_MISMATCH'
+  );
+  assert.equal(broadcast.mock.callCount(), 0);
+});
+
+test('late connected events cannot resurrect a durably ended call', async (t) => {
+  const service = new CallsService();
+  const active = {
+    callId, callerSessionId: caller.sessionId, acceptedSessionId: recipient.sessionId,
+    state: 'connecting', mediaProvider: 'livekit', roomName: `kryno-audio-${callId}`
+  };
+  (service as unknown as { callsById: Map<string, unknown> }).callsById.set(callId, active);
+  t.mock.method(pool, 'query', async (sql: string) => {
+    assert.match(sql, /where call_id = \$1 and state in \('ringing', 'connecting', 'connected'\)/);
+    return { rows: [], rowCount: 0 };
+  });
+  await service.handleCommand(recipient, { type: 'call_connected', callId });
 });

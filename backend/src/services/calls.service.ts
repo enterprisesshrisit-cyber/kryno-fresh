@@ -371,7 +371,7 @@ export class CallsService {
             end_reason = coalesce($4, end_reason),
             expires_at = case when $2 in ('connecting', 'connected') then greatest(expires_at, now() + interval '4 hours') else expires_at end,
             updated_at = now()
-          where call_id = $1
+          where call_id = $1 and state in ('ringing', 'connecting', 'connected')
         `,
         [call.callId, state, options.acceptedSessionId ?? null, options.endReason ?? null]
       );
@@ -1172,15 +1172,21 @@ export class CallsService {
     this.endCall(call, reason, auth.sessionId);
   }
 
-  private finishCall(auth: RelayAuthContext, command: CallEndCommand) {
+  private async finishCall(auth: RelayAuthContext, command: CallEndCommand) {
     const call = this.callsById.get(command.callId);
-    if (!call) {
+    if (!call || call.mediaProvider === 'livekit') {
+      const reason = command.reason === 'declined' || command.reason === 'cancelled'
+        ? command.reason : 'ended';
+      // Both HTTP and relay hangup use the same durable, atomic device authorization.
+      await this.endLiveKitCall(auth, { callId: command.callId, reason });
       return;
     }
 
-    const participantSessionIds = new Set<string>([call.callerSessionId, ...call.invitedSessionIds]);
+    const participantSessionIds = new Set<string>([call.callerSessionId]);
     if (call.acceptedSessionId) {
       participantSessionIds.add(call.acceptedSessionId);
+    } else {
+      for (const sessionId of call.invitedSessionIds) participantSessionIds.add(sessionId);
     }
 
     if (!participantSessionIds.has(auth.sessionId)) {
