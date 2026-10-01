@@ -3,6 +3,7 @@ import { AppError } from '../utils/errors.js';
 import { captureException } from './observability.service.js';
 import { pushService } from './push.service.js';
 import { relayService } from './relay.service.js';
+import { requireCouple } from './couples.service.js';
 
 const DEFAULT_QUEUE_TTL_HOURS = 24 * 365;
 const MAX_TTL_HOURS = 24 * 365;
@@ -40,6 +41,8 @@ type SendMessageInput = {
   encryptedContentType: string;
   clientCreatedAt: string;
   ttlHours?: number | null;
+  coupleId?: string;
+  temporaryControl?: boolean;
 };
 
 type AckMessageInput = {
@@ -312,6 +315,9 @@ export class MessagesService {
   }
 
   async sendMessage(input: SendMessageInput) {
+    if (input.messageType === 'couple_tool' && !input.coupleId) {
+      throw new AppError(403, 'Use the active couple connection.', 'COUPLE_ACCESS_DENIED');
+    }
     const persisted = await withTransaction(async (client) => {
       const recipientResult = await client.query<{
         id: string;
@@ -346,6 +352,11 @@ export class MessagesService {
       }
 
       await this.assertNotBlocked(input.senderUserId, recipient.id);
+
+      if (input.coupleId) {
+        const pair = await requireCouple(client, input.senderUserId, input.coupleId);
+        if (pair.partnerId !== recipient.id) throw new AppError(403, 'Partner connection changed.', 'COUPLE_ACCESS_DENIED');
+      }
 
       let targetDeviceSessionIds: string[];
       if (input.recipientDeviceSessionId) {
@@ -389,7 +400,7 @@ export class MessagesService {
       }
 
       const ttlHours = Math.min(Math.max(input.ttlHours ?? DEFAULT_QUEUE_TTL_HOURS, 1), MAX_TTL_HOURS);
-      const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
+      const expiresAt = new Date(Date.now() + (input.temporaryControl ? 60_000 : ttlHours * 60 * 60 * 1000));
       await client.query(
         `
           insert into direct_messages (
@@ -427,6 +438,10 @@ export class MessagesService {
         sender_user_id: string;
         recipient_user_id: string;
         recipient_device_session_id: string | null;
+        sender_device_session_id: string;
+        ciphertext: string;
+        encrypted_content_type: string;
+        message_type: string;
         server_received_at: string;
         expires_at: string;
       }>(
@@ -436,6 +451,7 @@ export class MessagesService {
             sender_user_id,
             recipient_user_id,
             recipient_device_session_id,
+            sender_device_session_id, ciphertext, encrypted_content_type, message_type,
             server_received_at,
             expires_at
           from direct_messages
@@ -449,6 +465,12 @@ export class MessagesService {
       if (!row || row.sender_user_id !== input.senderUserId || row.recipient_user_id !== recipient.id) {
         throw new AppError(409, 'Message identifier is already in use.', 'MESSAGE_ID_CONFLICT');
       }
+      if (input.coupleId && (row.sender_device_session_id !== input.senderSessionId
+        || row.recipient_device_session_id !== input.recipientDeviceSessionId
+        || row.ciphertext !== input.ciphertext || row.encrypted_content_type !== input.encryptedContentType
+        || row.message_type !== input.messageType)) {
+        throw new AppError(409, 'A shared update cannot change during retry.', 'MESSAGE_ID_CONFLICT');
+      }
 
       await client.query(
         `
@@ -458,6 +480,10 @@ export class MessagesService {
         `,
         [input.messageId, targetDeviceSessionIds]
       );
+
+      if (input.coupleId) {
+        await client.query('insert into couple_message_links(message_id, couple_id) values ($1, $2) on conflict do nothing', [input.messageId, input.coupleId]);
+      }
 
       return {
         messageId: row.message_id,
@@ -488,7 +514,7 @@ export class MessagesService {
       }
     });
 
-    const isCallControlMessage = input.messageType === 'call_media_key';
+    const isCallControlMessage = input.messageType === 'call_media_key' || !!input.temporaryControl;
     if (!isCallControlMessage) {
       void (async () => {
         const notificationPrefs = await this.getRecipientNotificationPrefs(

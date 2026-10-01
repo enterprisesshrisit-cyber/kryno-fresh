@@ -13,6 +13,7 @@ import { attachmentsRoutes } from './routes/attachments.routes.js';
 import { authRoutes } from './routes/auth.routes.js';
 import { billingRoutes } from './routes/billing.routes.js';
 import { callsRoutes } from './routes/calls.routes.js';
+import { couplesRoutes } from './routes/couples.routes.js';
 import { devicesRoutes } from './routes/devices.routes.js';
 import { keysRoutes } from './routes/keys.routes.js';
 import { messagesRoutes } from './routes/messages.routes.js';
@@ -176,6 +177,7 @@ export async function buildApp() {
   });
 
   await app.register(relayRoutes, { prefix: '/api/messages' });
+  await app.register(couplesRoutes, { prefix: '/api/couples' });
 
   await app.register(async (instance) => {
     await instance.register(rateLimit, {

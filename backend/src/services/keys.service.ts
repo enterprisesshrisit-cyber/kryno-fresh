@@ -21,6 +21,7 @@ type UploadBundleInput = {
 
 type FetchBundleTarget = {
   lookup: string;
+  deviceSessionId?: string;
 };
 
 export class KeysService {
@@ -144,10 +145,11 @@ export class KeysService {
           inner join device_sessions ds on ds.id = skb.device_session_id
           where skb.user_id = $1
             and ds.trusted = true
+            and ($2::uuid is null or ds.id = $2)
           order by ds.last_seen_at desc, skb.updated_at desc
           limit 1
         `,
-        [recipient.id]
+        [recipient.id, target.deviceSessionId ?? null]
       );
 
       const bundles = [];

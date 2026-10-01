@@ -61,6 +61,8 @@ const envSchema = z.object({
   LIVEKIT_URL: z.string().url().optional(),
   LIVEKIT_API_KEY: z.string().optional(),
   LIVEKIT_API_SECRET: z.string().optional(),
+  SCREEN_SHARE_FREE_SECONDS_PER_DAY: z.coerce.number().int().min(0).max(86400).default(600),
+  LIVE_TYPING_FREE_SECONDS_PER_DAY: z.coerce.number().int().min(0).max(86400).default(1200),
   R2_ACCOUNT_ID: z.string().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),

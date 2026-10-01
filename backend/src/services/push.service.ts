@@ -178,6 +178,14 @@ function stringifyPushData(data: Record<string, string>) {
 }
 
 export class PushService {
+  async sendCoupleScreenRequest(recipientUserId: string, sessionId: string) {
+    return this.sendNotificationToUser({ recipientUserId, payload: {
+      title: 'Kryno screen request', body: 'Your partner would like to view your screen.',
+      channelId: 'kryno-messages', ttlSeconds: 60,
+      data: { type: 'couple_screen_request', sessionId }
+    } });
+  }
+
   async sendDirectMessageNotification(input: DirectMessagePushInput) {
     const senderLabel = input.senderUsername?.trim();
     const privateBody = 'Open Kryno to view it.';

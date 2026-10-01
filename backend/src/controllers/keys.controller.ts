@@ -40,8 +40,10 @@ export async function uploadBundleController(request: FastifyRequest, reply: Fas
 
 export async function fetchRecipientBundlesController(request: FastifyRequest, reply: FastifyReply) {
   const params = fetchBundleParamsSchema.parse(request.params);
+  const query = z.object({ deviceSessionId: z.uuid().optional() }).parse(request.query);
   const result = await keysService.fetchRecipientBundles({
-    lookup: params.lookup
+    lookup: params.lookup,
+    deviceSessionId: query.deviceSessionId
   });
 
   return reply.code(200).send(result);
