@@ -10,6 +10,8 @@ create index if not exists direct_message_deliveries_pending_idx
   on direct_message_deliveries(device_session_id, created_at)
   where acked_at is null;
 
+alter table direct_message_deliveries enable row level security;
+
 -- Preserve pending deliveries created by older releases. Device-targeted
 -- messages remain targeted; account-targeted messages fan out to every
 -- currently trusted device owned by the recipient.
