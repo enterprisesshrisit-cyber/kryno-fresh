@@ -47,13 +47,37 @@ export async function buildApp() {
           'body.device_public_key',
           'body.encryptedBytesBase64',
           'body.pushToken',
-          'body.push_token'
+          'body.push_token',
+          'body.installation_credential',
+          'body.installationCredential',
+          'req.body.installation_credential',
+          'req.body.installationCredential',
+          'request.body.installation_credential',
+          'request.body.installationCredential'
         ],
         remove: true
       }
     },
     trustProxy: true,
     bodyLimit: mediaBodyLimit
+  });
+  // Child route plugins inherit the handler at registration time.
+  app.setErrorHandler((error, request, reply) => {
+    if (error instanceof ZodError) {
+      request.log.warn({ code: 'VALIDATION_ERROR', requestId: request.id }, 'Request validation failed');
+      return reply.code(400).send({ error: 'VALIDATION_ERROR', message: 'Invalid request body.' });
+    }
+    if (error instanceof AppError) {
+      request.log.warn({ code: error.code, requestId: request.id, status: error.statusCode }, 'Request rejected');
+      return reply.code(error.statusCode).send({ error: error.code, message: error.message });
+    }
+    const httpError = error as { statusCode?: number; code?: string } | null;
+    if (httpError?.statusCode && httpError.statusCode >= 400 && httpError.statusCode < 500) {
+      return reply.code(httpError.statusCode).send({ error: httpError.code ?? 'INVALID_REQUEST', message: 'Invalid request.' });
+    }
+    captureException(error, { path: request.url, method: request.method, requestId: request.id });
+    request.log.error({ errorType: error instanceof Error ? error.name : 'unknown', requestId: request.id }, 'Request failed');
+    return reply.code(500).send({ error: 'INTERNAL_SERVER_ERROR', message: 'An unexpected error occurred.' });
   });
   const frontendDistCandidates = [resolve(process.cwd(), '..', 'dist'), resolve(process.cwd(), 'dist')];
   const frontendDist = frontendDistCandidates.find((candidate) => existsSync(candidate));
@@ -74,6 +98,7 @@ export async function buildApp() {
   });
 
   app.addHook('onSend', async (request, reply, payload) => {
+    reply.header('X-Request-ID', request.id);
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('X-Frame-Options', 'DENY');
     reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -247,46 +272,6 @@ export async function buildApp() {
       return reply.sendFile('index.html');
     });
   }
-
-  app.setErrorHandler((error, _request, reply) => {
-    if (error instanceof ZodError) {
-      return reply.code(400).send({
-        error: 'VALIDATION_ERROR',
-        issues: error.flatten()
-      });
-    }
-
-    if (error instanceof AppError) {
-      if (error.statusCode === 401 || error.statusCode === 403 || error.statusCode === 429) {
-        app.log.warn(
-          {
-            code: error.code,
-            path: _request.url,
-            method: _request.method,
-            ip: _request.ip
-          },
-          error.message
-        );
-      }
-
-      return reply.code(error.statusCode).send({
-        error: error.code,
-        message: error.message
-      });
-    }
-
-    captureException(error, {
-      path: _request.url,
-      method: _request.method,
-      ip: _request.ip
-    });
-
-    app.log.error(error);
-    return reply.code(500).send({
-      error: 'INTERNAL_SERVER_ERROR',
-      message: 'An unexpected error occurred.'
-    });
-  });
 
   return app;
 }

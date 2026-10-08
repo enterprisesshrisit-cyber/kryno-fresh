@@ -37,3 +37,10 @@ test('signRefreshToken and verifyRefreshToken round-trip family claims', async (
   assert.equal(payload.family, 'family-id-1');
   assert.equal(payload.type, 'refresh');
 });
+
+test('access token preserves its login family across authenticated requests', async () => {
+  const token = await tokenService.signAccessToken({
+    userId: 'fixture-user', sessionId: 'fixture-session', deviceId: 'fixture-device', tokenFamilyId: 'fixture-family'
+  });
+  assert.equal((await tokenService.verifyAccessToken(token)).family, 'fixture-family');
+});

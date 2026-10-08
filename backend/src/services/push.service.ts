@@ -3,12 +3,15 @@ import { env } from '../config/env.js';
 import { captureException } from './observability.service.js';
 import { importPKCS8, SignJWT } from 'jose';
 import { readFileSync } from 'node:fs';
+import { ACTIVE_PUSH_TARGETS_SQL } from './push-ownership.service.js';
 
 type PushTarget = {
   session_id: string;
   push_provider: 'expo' | 'fcm' | string;
   push_token: string;
   push_platform: string | null;
+  push_generation: string;
+  push_scope_version: number;
 };
 
 type DirectMessagePushInput = {
@@ -36,7 +39,7 @@ type ExpoPushPayload = {
 const EXPO_PUSH_ENDPOINT = 'https://exp.host/--/api/v2/push/send';
 const FCM_OAUTH_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const FCM_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
-const UNDEFINED_COLUMN_CODE = '42703';
+const MISSING_SCHEMA_CODES = ['42703', '42P01'];
 
 function isExpoPushToken(value: string) {
   return /^ExponentPushToken\[[^\]]+\]$/.test(value) || /^ExpoPushToken\[[^\]]+\]$/.test(value);
@@ -177,6 +180,23 @@ function stringifyPushData(data: Record<string, string>) {
   );
 }
 
+export function buildFcmMessage(target: PushTarget, payload: ExpoPushPayload) {
+  const dataOnly = payload.channelId === 'kryno-incoming-calls-v4' ||
+    (target.push_platform === 'android' && target.push_scope_version === 1);
+  return {
+    token: target.push_token,
+    ...(!dataOnly ? { notification: { title: payload.title, body: payload.body } } : {}),
+    data: stringifyPushData({ ...payload.data, pushGeneration: target.push_generation,
+      pushScopeVersion: String(target.push_scope_version ?? 0), channelId: payload.channelId,
+      title: payload.title, body: payload.body }),
+    android: {
+      priority: 'HIGH', ttl: `${payload.ttlSeconds ?? 3600}s`,
+      ...(!dataOnly ? { notification: { channel_id: payload.channelId, sound: 'default',
+        default_vibrate_timings: true, visibility: 'PRIVATE' } } : {})
+    }
+  };
+}
+
 export class PushService {
   async sendCoupleScreenRequest(recipientUserId: string, sessionId: string) {
     return this.sendNotificationToUser({ recipientUserId, payload: {
@@ -247,20 +267,15 @@ export class PushService {
     try {
       result = await pool.query<PushTarget>(
         `
-          select id as session_id, push_provider, push_token, push_platform
-          from device_sessions
-          where user_id = $1
-            and trusted = true
-            and push_token is not null
-            and push_provider in ('expo', 'fcm')
-            and not (id = any($2::uuid[]))
-          order by push_token_updated_at desc nulls last
+          ${ACTIVE_PUSH_TARGETS_SQL}
+            and not (d.id = any($2::uuid[]))
+          order by d.push_token_updated_at desc nulls last
           limit 10
         `,
         [input.recipientUserId, excluded]
       );
     } catch (error) {
-      if ((error as { code?: string }).code === UNDEFINED_COLUMN_CODE) {
+      if (MISSING_SCHEMA_CODES.includes((error as { code?: string }).code ?? '')) {
         captureException(error, {
           surface: 'PushService',
           reason: 'device_push_schema_missing'
@@ -283,12 +298,13 @@ export class PushService {
     }
 
     let sent = 0;
+    const payload = { ...input.payload, data: { ...input.payload.data, recipientUserId: input.recipientUserId } };
     for (const target of targets) {
       if (input.payload.data.type === 'call_ended' && target.push_provider !== 'fcm') continue;
       try {
         const delivered = target.push_provider === 'fcm'
-          ? await this.sendFcmNotification(target, input.payload)
-          : await this.sendExpoNotification(target, input.payload);
+          ? await this.sendFcmNotification(target, payload)
+          : await this.sendExpoNotification(target, payload);
 
         if (delivered) {
           sent += 1;
@@ -305,7 +321,15 @@ export class PushService {
     return { attempted: targets.length, sent };
   }
 
+  private async isTargetCurrent(target: PushTarget, payload: ExpoPushPayload) {
+    const result = await pool.query(`${ACTIVE_PUSH_TARGETS_SQL}
+      and d.id = $2 and o.generation = $3 and d.push_provider = $4 and d.push_token = $5`,
+    [payload.data.recipientUserId, target.session_id, target.push_generation, target.push_provider, target.push_token]);
+    return result.rows.length === 1;
+  }
+
   private async sendExpoNotification(target: PushTarget, payload: ExpoPushPayload) {
+    if (!await this.isTargetCurrent(target, payload)) return false;
     const response = await fetch(EXPO_PUSH_ENDPOINT, {
       method: 'POST',
       headers: {
@@ -321,7 +345,7 @@ export class PushService {
         channelId: payload.channelId,
         priority: 'high',
         ttl: payload.ttlSeconds,
-        data: payload.data
+        data: { ...payload.data, pushGeneration: target.push_generation }
       })
     });
 
@@ -349,7 +373,7 @@ export class PushService {
     }
 
     const accessToken = await getFirebaseAccessToken(config);
-    const isIncomingCall = payload.channelId === 'kryno-incoming-calls-v4';
+    if (!await this.isTargetCurrent(target, payload)) return false;
     const response = await fetch(`https://fcm.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}/messages:send`, {
       method: 'POST',
       headers: {
@@ -357,43 +381,15 @@ export class PushService {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        message: {
-          token: target.push_token,
-          ...(isIncomingCall
-            ? {}
-            : {
-                notification: {
-                  title: payload.title,
-                  body: payload.body
-                }
-              }),
-          data: stringifyPushData({
-            ...payload.data,
-            channelId: payload.channelId,
-            title: payload.title,
-            body: payload.body
-          }),
-          android: {
-            priority: 'HIGH',
-            ttl: `${payload.ttlSeconds ?? 3600}s`,
-            ...(isIncomingCall
-              ? {}
-              : {
-                  notification: {
-                    channel_id: payload.channelId,
-                    sound: 'default',
-                    default_vibrate_timings: true,
-                    visibility: 'PRIVATE'
-                  }
-                })
-          }
-        }
+        message: buildFcmMessage(target, payload)
       })
     });
 
     if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      captureException(new Error(`FCM push failed with HTTP ${response.status}${text ? `: ${text.slice(0, 200)}` : ''}`), {
+      // Provider error bodies may echo request metadata/tokens. Keep diagnostics
+      // to the HTTP status; never transcribe their raw body into application logs.
+      await response.body?.cancel().catch(() => undefined);
+      captureException(new Error(`FCM push failed with HTTP ${response.status}`), {
         surface: 'PushService',
         provider: target.push_provider,
         platform: target.push_platform ?? 'unknown'
@@ -401,6 +397,7 @@ export class PushService {
       return false;
     }
 
+    console.info('[KrynoPush] FCM accepted', { httpStatus: response.status, scopeVersion: target.push_scope_version });
     return true;
   }
 }

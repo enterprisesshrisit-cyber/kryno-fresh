@@ -8,6 +8,7 @@ type AuthContext = {
   userId: string;
   sessionId: string;
   deviceId: string;
+  tokenFamilyId?: string;
 };
 
 declare module 'fastify' {
@@ -65,7 +66,8 @@ export async function authenticateAccessToken(token: string) {
   return {
     userId: payload.sub,
     sessionId: payload.sid,
-    deviceId: payload.did
+    deviceId: payload.did,
+    tokenFamilyId: payload.family
   };
 }
 

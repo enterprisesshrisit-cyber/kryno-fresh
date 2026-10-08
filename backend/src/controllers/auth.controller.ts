@@ -11,7 +11,8 @@ const signupSchema = z.object({
   password: z.string().min(10).max(128),
   device_id: z.string().min(8).max(128),
   device_name: z.string().max(120).optional(),
-  device_public_key: z.string().min(16)
+  device_public_key: z.string().min(16),
+  installation_credential: z.string().regex(/^[0-9a-f]{64}$/).optional()
 });
 
 const loginSchema = z.object({
@@ -19,7 +20,8 @@ const loginSchema = z.object({
   password: z.string().min(10).max(128),
   device_id: z.string().min(8).max(128),
   device_name: z.string().max(120).optional(),
-  device_public_key: z.string().min(16)
+  device_public_key: z.string().min(16),
+  installation_credential: z.string().regex(/^[0-9a-f]{64}$/).optional()
 });
 
 const verifyEmailSchema = z.object({
@@ -106,6 +108,7 @@ export async function signupController(request: FastifyRequest, reply: FastifyRe
       email: body.email,
       password: body.password,
       deviceId: body.device_id,
+      installationCredential: body.installation_credential,
       deviceName: body.device_name,
       devicePublicKey: body.device_public_key
     },
@@ -121,6 +124,7 @@ export async function loginController(request: FastifyRequest, reply: FastifyRep
       identifier: body.identifier,
       password: body.password,
       deviceId: body.device_id,
+      installationCredential: body.installation_credential,
       deviceName: body.device_name,
       devicePublicKey: body.device_public_key
     },

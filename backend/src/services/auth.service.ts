@@ -8,6 +8,8 @@ import { emailService } from './email.service.js';
 import { tokenService } from './token.service.js';
 import { generateOtpCode, hmacSha256, sha256 } from '../utils/crypto.js';
 import { SlidingWindowRateLimiter } from '../utils/security.js';
+import { activatePushOwner, lockPushInstallation, retirePushOwner } from './push-ownership.service.js';
+import { authorizePushLogin } from './installation-credential.service.js';
 
 type RequestMeta = {
   ip: string | null;
@@ -16,6 +18,7 @@ type RequestMeta = {
 
 type DeviceInput = {
   deviceId: string;
+  installationCredential?: string;
   deviceName?: string | null;
   devicePublicKey: string;
 };
@@ -96,6 +99,8 @@ async function upsertDeviceSession(
   device: DeviceInput,
   meta: RequestMeta
 ) {
+  await lockPushInstallation(client, device.deviceId);
+  const canOwnPush = await authorizePushLogin(client, userId, device.deviceId, device.installationCredential);
   const existingSession = await client.query<{ id: string }>(
     `
       select id
@@ -139,6 +144,7 @@ async function upsertDeviceSession(
 
   return {
     sessionId: result.rows[0].id,
+    canOwnPush,
     isNewDevice: !existingSession.rows[0]
   };
 }
@@ -148,7 +154,8 @@ async function createRefreshSession(
   userId: string,
   sessionId: string,
   deviceId: string,
-  meta: RequestMeta
+  meta: RequestMeta,
+  canOwnPush: boolean
 ) {
   const tokenId = crypto.randomUUID();
   const familyId = crypto.randomUUID();
@@ -173,7 +180,8 @@ async function createRefreshSession(
     [tokenId, userId, sessionId, familyId, refreshHash, expiresAt.toISOString(), meta.ip, meta.userAgent]
   );
 
-  const accessToken = await tokenService.signAccessToken({ userId, sessionId, deviceId });
+  if (canOwnPush) await activatePushOwner(client, sessionId, deviceId, familyId);
+  const accessToken = await tokenService.signAccessToken({ userId, sessionId, deviceId, tokenFamilyId: familyId });
 
   return { accessToken, refreshToken };
 }
@@ -435,7 +443,7 @@ export class AuthService {
 
     const loginResult = await withTransaction(async (client) => {
       const deviceSession = await upsertDeviceSession(client, user.id, input, meta);
-      const tokens = await createRefreshSession(client, user.id, deviceSession.sessionId, input.deviceId, meta);
+      const tokens = await createRefreshSession(client, user.id, deviceSession.sessionId, input.deviceId, meta, deviceSession.canOwnPush);
 
       return {
         user: {
@@ -479,6 +487,7 @@ export class AuthService {
     const refreshHash = sha256(input.refreshToken);
 
     const result = await withTransaction(async (client) => {
+      await lockPushInstallation(client, input.deviceId);
       const tokenResult = await client.query<{
         id: string;
         user_id: string;
@@ -592,7 +601,8 @@ export class AuthService {
       const accessToken = await tokenService.signAccessToken({
         userId: payload.sub,
         sessionId: existing.device_session_id,
-        deviceId: session.device_id
+        deviceId: session.device_id,
+        tokenFamilyId: existing.token_family_id
       });
 
       return {
@@ -608,13 +618,24 @@ export class AuthService {
     const refreshHash = sha256(input.refreshToken);
 
     await withTransaction(async (client) => {
-      const result = await client.query<{ id: string }>(
-        'select id from refresh_tokens where token_hash = $1 for update',
+      const result = await client.query<{
+        user_id: string; device_session_id: string; token_family_id: string; device_id: string;
+      }>(
+        `select r.user_id, r.device_session_id, r.token_family_id, d.device_id
+         from refresh_tokens r join device_sessions d on d.id = r.device_session_id
+         where r.token_hash = $1`,
         [refreshHash]
       );
 
-      if (result.rows[0]) {
-        await client.query('update refresh_tokens set revoked_at = now() where id = $1', [result.rows[0].id]);
+      const session = result.rows[0];
+      if (session) {
+        await lockPushInstallation(client, session.device_id);
+        // A refresh may have rotated while logout was in flight. Revoke the login
+        // family, not just its obsolete token; a later login family is untouched.
+        await client.query(`update refresh_tokens set revoked_at = coalesce(revoked_at, now())
+          where user_id = $1 and device_session_id = $2 and token_family_id = $3`,
+        [session.user_id, session.device_session_id, session.token_family_id]);
+        await retirePushOwner(client, session.device_session_id, session.device_id, session.token_family_id);
       }
     });
 

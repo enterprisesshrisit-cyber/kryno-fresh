@@ -9,11 +9,12 @@ type TokenSubject = {
   userId: string;
   sessionId: string;
   deviceId: string;
+  tokenFamilyId?: string;
 };
 
 export class TokenService {
   async signAccessToken(subject: TokenSubject): Promise<string> {
-    return new SignJWT({ sid: subject.sessionId, did: subject.deviceId, type: 'access' })
+    return new SignJWT({ sid: subject.sessionId, did: subject.deviceId, family: subject.tokenFamilyId, type: 'access' })
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuer(env.JWT_ISSUER)
       .setAudience(env.JWT_AUDIENCE)
@@ -63,6 +64,7 @@ export class TokenService {
       sid: string;
       did: string;
       type: 'access';
+      family?: string;
       exp: number;
     };
   }
