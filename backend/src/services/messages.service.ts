@@ -4,29 +4,35 @@ import { captureException } from './observability.service.js';
 import { pushService } from './push.service.js';
 import { relayService } from './relay.service.js';
 import { requireCouple } from './couples.service.js';
+import { messagePushDiagnostic } from './messagePushDiagnostics.js';
 
 const DEFAULT_QUEUE_TTL_HOURS = 24 * 365;
 const MAX_TTL_HOURS = 24 * 365;
 
 async function trySendMessagePush(
+  messageId: string,
   recipientUserId: string,
   senderUsername: string | undefined,
   excludeSessionIds: string[] | undefined,
   senderPrivate: boolean
 ) {
   try {
-    return await pushService.sendDirectMessageNotification({
+    const result = await pushService.sendDirectMessageNotification({
       recipientUserId,
       senderUsername,
       senderPrivate,
       excludeSessionIds
     });
+    console.info('[KrynoPush] Message dispatch outcome', messagePushDiagnostic(messageId, excludeSessionIds?.length ?? 0, result));
+    return result;
   } catch (error) {
     captureException(error, {
       surface: 'MessagesService',
       reason: 'push_notification_failed'
     });
-    return { attempted: 0, sent: 0, failed: true };
+    const result = { attempted: 0, sent: 0, failed: true };
+    console.info('[KrynoPush] Message dispatch outcome', messagePushDiagnostic(messageId, excludeSessionIds?.length ?? 0, result));
+    return result;
   }
 }
 
@@ -523,16 +529,23 @@ export class MessagesService {
         );
         if (!notificationPrefs.muted && !notificationPrefs.focusMode) {
           await trySendMessagePush(
+            persisted.messageId,
             persisted.recipientUserId,
             persisted.senderUsername,
             relayResult.deliveredSessionIds,
             notificationPrefs.privateMode
           );
+        } else {
+          console.info('[KrynoPush] Message dispatch outcome',
+            messagePushDiagnostic(persisted.messageId, relayResult.deliveredSessionIds.length,
+              { skipped: notificationPrefs.muted ? 'muted' : 'focus-mode' }));
         }
-      })().catch((error) => captureException(error, {
-        surface: 'MessagesService',
-        reason: 'push_dispatch_failed'
-      }));
+      })().catch((error) => {
+        console.info('[KrynoPush] Message dispatch outcome',
+          messagePushDiagnostic(persisted.messageId, relayResult.deliveredSessionIds.length,
+            { skipped: 'dispatch-task-failed' }));
+        captureException(error, { surface: 'MessagesService', reason: 'push_dispatch_failed' });
+      });
     }
 
     return {
