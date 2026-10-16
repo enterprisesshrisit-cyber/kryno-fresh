@@ -5,6 +5,7 @@ import { pushService, buildFcmMessage } from './push.service.js';
 
 const target = { session_id: 'fixture-session', push_provider: 'expo',
   push_token: 'ExpoPushToken[fixture-only-not-a-real-token]', push_platform: 'android', push_generation: 'fixture-generation' };
+const messageId = '11111111-2222-4333-8444-555555555555';
 
 test('dispatch rechecks current generation and supplies the native account binding', async (t) => {
   const queries: string[] = [];
@@ -17,14 +18,14 @@ test('dispatch rechecks current generation and supplies the native account bindi
     sent = JSON.parse(String(init.body));
     return new Response('{}', { status: 200 });
   });
-  const result = await pushService.sendDirectMessageNotification({ recipientUserId: 'fixture-recipient' });
+  const result = await pushService.sendDirectMessageNotification({ messageId, recipientUserId: 'fixture-recipient' });
   assert.equal(result.sent, 1);
   assert.equal(queries.length, 2);
   assert.match(queries[0], /o.generation = d.push_owner_generation/);
   assert.match(queries[0], /r.token_family_id = o.token_family_id/);
   assert.match(queries[1], /o.generation = \$3/);
   assert.deepEqual((sent as unknown as { data: unknown }).data,
-    { type: 'direct_message', recipientUserId: 'fixture-recipient', pushGeneration: 'fixture-generation' });
+    { type: 'direct_message', messageId, recipientUserId: 'fixture-recipient', pushGeneration: 'fixture-generation' });
 });
 
 test('scoped Android push never uses an OS auto-display notification payload', () => {
@@ -42,9 +43,10 @@ test('scoped Android push never uses an OS auto-display notification payload', (
 
 test('unupgraded Android registrations retain their compatible message format', () => {
   const result = buildFcmMessage({ ...target, push_provider: 'fcm', push_scope_version: 0 },
-    { title: 'fixture', body: 'fixture', channelId: 'kryno-messages', data: { type: 'direct_message' } });
+    { title: 'fixture', body: 'fixture', channelId: 'kryno-messages', data: { type: 'direct_message', messageId } });
   assert.equal('notification' in result, true);
   assert.equal(result.data.pushScopeVersion, '0');
+  assert.equal(result.data.messageId, messageId);
 });
 
 test('logout or account switch after discovery suppresses the obsolete provider request', async (t) => {
@@ -64,6 +66,6 @@ test('logout or account switch after discovery suppresses the obsolete provider 
 test('an inactive installation has no dispatch targets', async (t) => {
   t.mock.method(pool, 'query', async () => ({ rows: [] }));
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('No provider request allowed'); });
-  assert.deepEqual(await pushService.sendDirectMessageNotification({ recipientUserId: 'fixture-recipient' }),
+  assert.deepEqual(await pushService.sendDirectMessageNotification({ messageId, recipientUserId: 'fixture-recipient' }),
     { attempted: 0, sent: 0 });
 });

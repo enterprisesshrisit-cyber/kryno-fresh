@@ -15,6 +15,7 @@ type PushTarget = {
 };
 
 type DirectMessagePushInput = {
+  messageId: string;
   recipientUserId: string;
   senderUsername?: string;
   senderPrivate?: boolean;
@@ -221,7 +222,8 @@ export class PushService {
             : 'You have a new private message.',
         channelId: 'kryno-messages',
         data: {
-          type: 'direct_message'
+          type: 'direct_message',
+          messageId: input.messageId
         }
       }
     });

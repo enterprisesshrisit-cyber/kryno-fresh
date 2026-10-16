@@ -18,6 +18,7 @@ async function trySendMessagePush(
 ) {
   try {
     const result = await pushService.sendDirectMessageNotification({
+      messageId,
       recipientUserId,
       senderUsername,
       senderPrivate,

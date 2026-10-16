@@ -3,15 +3,18 @@ import { afterEach, test } from 'node:test';
 import { pool } from '../db/pool.js';
 import { MessagesService } from './messages.service.js';
 import { relayService } from './relay.service.js';
+import { pushService } from './push.service.js';
 
 const originalConnect = pool.connect.bind(pool);
 const originalPoolQuery = pool.query.bind(pool);
 const originalDeliver = relayService.deliverDirectMessage.bind(relayService);
+const originalPush = pushService.sendDirectMessageNotification.bind(pushService);
 
 afterEach(() => {
   pool.connect = originalConnect as typeof pool.connect;
   pool.query = originalPoolQuery as typeof pool.query;
   relayService.deliverDirectMessage = originalDeliver;
+  pushService.sendDirectMessageNotification = originalPush;
 });
 
 test('direct message ciphertext commits before realtime relay', async () => {
@@ -23,6 +26,16 @@ test('direct message ciphertext commits before realtime relay', async () => {
   const senderUserId = '44444444-4444-4444-8444-444444444444';
   const senderSessionId = '55555555-5555-4555-8555-555555555555';
   const messageId = '66666666-6666-4666-8666-666666666666';
+  let pushedId = '';
+  let pushedExcluded: string[] | undefined;
+  let finishPush!: () => void;
+  const pushFinished = new Promise<void>((resolve) => { finishPush = resolve; });
+  pushService.sendDirectMessageNotification = async (input) => {
+    pushedId = input.messageId;
+    pushedExcluded = input.excludeSessionIds;
+    finishPush();
+    return { attempted: 0, sent: 0 };
+  };
 
   const client = {
     async query(sql: string) {
@@ -82,7 +95,7 @@ test('direct message ciphertext commits before realtime relay', async () => {
     }
     if (normalized.includes('from direct_conversation_settings')) {
       await notificationPrefsReady;
-      return { rows: [{ muted: true, focus_mode: false, private_mode: false }], rowCount: 1 };
+      return { rows: [{ muted: false, focus_mode: false, private_mode: false }], rowCount: 1 };
     }
     throw new Error(`Unexpected pool query: ${normalized}`);
   }) as typeof pool.query;
@@ -121,6 +134,9 @@ test('direct message ciphertext commits before realtime relay', async () => {
   assert.ok(events.indexOf('persist-message') < events.indexOf('commit'));
   assert.ok(events.indexOf('persist-delivery') < events.indexOf('commit'));
   assert.ok(events.indexOf('commit') < events.indexOf('relay'));
+  await pushFinished;
+  assert.equal(pushedId, messageId);
+  assert.deepEqual(pushedExcluded, [recipientSessionId]);
 });
 
 test('acknowledgement is scoped to one device and deletes only after all devices ack', async () => {
