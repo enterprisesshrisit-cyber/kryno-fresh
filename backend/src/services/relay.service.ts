@@ -43,10 +43,14 @@ export class RelayService {
     }
 
     try {
+      if (connection.socket.readyState !== 1) {
+        this.unregisterConnection(sessionId, connection.socket);
+        return false;
+      }
       connection.socket.send(JSON.stringify(payload));
       return true;
     } catch {
-      this.unregisterConnection(sessionId);
+      this.unregisterConnection(sessionId, connection.socket);
       return false;
     }
   }
@@ -88,22 +92,23 @@ export class RelayService {
     this.sessionsByUser.set(auth.userId, userSessions);
   }
 
-  unregisterConnection(sessionId: string) {
+  unregisterConnection(sessionId: string, socket?: RelaySocket) {
     const existing = this.connectionsBySession.get(sessionId);
-    if (!existing) {
-      return;
+    if (!existing || (socket && existing.socket !== socket)) {
+      return false;
     }
 
     this.connectionsBySession.delete(sessionId);
     const userSessions = this.sessionsByUser.get(existing.userId);
     if (!userSessions) {
-      return;
+      return true;
     }
 
     userSessions.delete(sessionId);
     if (userSessions.size === 0) {
       this.sessionsByUser.delete(existing.userId);
     }
+    return true;
   }
 
   deliverDirectMessage(target: {

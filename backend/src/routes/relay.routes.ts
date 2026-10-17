@@ -77,17 +77,15 @@ export async function relayRoutes(app: FastifyInstance) {
 
     socket.on('close', () => {
       clearTimeout(authTimeout);
-      if (auth) {
+      if (auth && relayService.unregisterConnection(auth.sessionId, socket)) {
         callsService.handleSessionDisconnect(auth.sessionId);
-        relayService.unregisterConnection(auth.sessionId);
       }
     });
 
     socket.on('error', () => {
       clearTimeout(authTimeout);
-      if (auth) {
+      if (auth && relayService.unregisterConnection(auth.sessionId, socket)) {
         callsService.handleSessionDisconnect(auth.sessionId);
-        relayService.unregisterConnection(auth.sessionId);
       }
     });
 
