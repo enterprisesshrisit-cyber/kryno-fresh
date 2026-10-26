@@ -16,7 +16,8 @@ export async function activatePushOwner(client: PoolClient, sessionId: string, d
   `, [deviceId, sessionId, familyId]);
   await client.query(`
     update device_sessions set push_token = null, push_provider = null,
-      push_platform = null, push_token_updated_at = null, push_owner_generation = null
+      push_platform = null, push_token_updated_at = null, push_owner_generation = null,
+      message_notification_version = 0
     where device_id = $1
   `, [deviceId]);
 }
@@ -30,7 +31,8 @@ export async function retirePushOwner(client: PoolClient, sessionId: string, dev
   if (retired.rows[0]) {
     await client.query(`
       update device_sessions set push_token = null, push_provider = null,
-        push_platform = null, push_token_updated_at = null, push_owner_generation = null
+        push_platform = null, push_token_updated_at = null, push_owner_generation = null,
+        message_notification_version = 0
       where id = $1 and push_owner_generation = $2
     `, [sessionId, retired.rows[0].generation]);
   }
@@ -40,7 +42,7 @@ export async function retirePushOwner(client: PoolClient, sessionId: string, dev
 // enough: it must still own this installation and this exact registration generation.
 export const ACTIVE_PUSH_TARGETS_SQL = `
   select d.id as session_id, d.push_provider, d.push_token, d.push_platform,
-    o.generation as push_generation, d.push_scope_version
+    o.generation as push_generation, d.push_scope_version, d.message_notification_version
   from device_sessions d
   join push_installation_owners o on o.device_id = d.device_id
     and o.device_session_id = d.id and o.generation = d.push_owner_generation

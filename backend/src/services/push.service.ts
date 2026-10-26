@@ -12,11 +12,15 @@ type PushTarget = {
   push_platform: string | null;
   push_generation: string;
   push_scope_version: number;
+  message_notification_version?: number;
+  message_private?: boolean;
 };
 
 type DirectMessagePushInput = {
   messageId: string;
   recipientUserId: string;
+  senderUserId: string;
+  intendedSessionIds: readonly string[];
   senderUsername?: string;
   senderPrivate?: boolean;
   excludeSessionIds?: string[];
@@ -41,6 +45,32 @@ const EXPO_PUSH_ENDPOINT = 'https://exp.host/--/api/v2/push/send';
 const FCM_OAUTH_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const FCM_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
 const MISSING_SCHEMA_CODES = ['42703', '42P01'];
+
+// An explicit target intersection is mandatory, even for legacy registrations.
+export const DIRECT_MESSAGE_PUSH_TARGETS_SQL = `
+  select active.*, coalesce(prefs.private_mode, false) as message_private
+  from (${ACTIVE_PUSH_TARGETS_SQL}) active
+  left join direct_conversation_settings prefs on prefs.user_id = $1 and prefs.peer_user_id = $4
+  where active.session_id = any($2::uuid[])
+    and not coalesce(prefs.muted, false) and not coalesce(prefs.focus_mode, false)
+    and not exists (select 1 from blocked_users b
+      where (b.blocker_user_id = $1 and b.blocked_user_id = $4)
+         or (b.blocker_user_id = $4 and b.blocked_user_id = $1))
+    and exists (select 1 from direct_messages dm
+      join direct_message_deliveries dmd on dmd.message_id = dm.message_id
+      where dm.message_id = $3::uuid and dm.recipient_user_id = $1 and dm.sender_user_id = $4
+        and dm.expires_at > now() and dm.notification_is_control = false
+        and active.session_id = any(dm.notification_target_session_ids)
+        and (dm.recipient_device_session_id is null or dm.recipient_device_session_id = active.session_id)
+        and dmd.device_session_id = active.session_id and dmd.acked_at is null)
+`;
+
+function isMessageNotificationV1(target: PushTarget) {
+  return target.message_notification_version === 1 && target.push_provider === 'fcm'
+    && target.push_platform === 'android' && target.push_scope_version === 1;
+}
+
+type SubmissionGuard = { check(): Promise<boolean>; submitted(): void };
 
 function isExpoPushToken(value: string) {
   return /^ExponentPushToken\[[^\]]+\]$/.test(value) || /^ExpoPushToken\[[^\]]+\]$/.test(value);
@@ -208,25 +238,71 @@ export class PushService {
   }
 
   async sendDirectMessageNotification(input: DirectMessagePushInput) {
-    const senderLabel = input.senderUsername?.trim();
-    const privateBody = 'Open Kryno to view it.';
-    return this.sendNotificationToUser({
-      recipientUserId: input.recipientUserId,
-      excludeSessionIds: input.excludeSessionIds,
-      payload: {
-        title: 'New Kryno message',
-        body: input.senderPrivate
-          ? privateBody
-          : senderLabel
-            ? `${senderLabel} sent you a private message.`
-            : 'You have a new private message.',
-        channelId: 'kryno-messages',
-        data: {
-          type: 'direct_message',
-          messageId: input.messageId
-        }
-      }
+    const intended = Array.isArray(input.intendedSessionIds) ? [...new Set(input.intendedSessionIds)] : [];
+    const counts = { intendedTargetCount: intended.length, eligibleTargetCount: 0,
+      matchedRelayExclusionCount: 0, revalidatedOutCount: 0 };
+    if (intended.length === 0) return { attempted: 0, sent: 0, ...counts };
+    const params = [input.recipientUserId, intended, input.messageId, input.senderUserId];
+    let discovered;
+    try {
+      discovered = await pool.query<PushTarget>(DIRECT_MESSAGE_PUSH_TARGETS_SQL, params);
+    } catch (error) {
+      if (!MISSING_SCHEMA_CODES.includes((error as { code?: string }).code ?? '')) throw error;
+      captureException(error, { surface: 'PushService', reason: 'device_push_schema_missing' });
+      return { attempted: 0, sent: 0, disabled: true, ...counts };
+    }
+    const excluded = new Set(input.excludeSessionIds ?? []);
+    const allowed = (target: PushTarget) => !excluded.has(target.session_id)
+      || (env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED && isMessageNotificationV1(target));
+    const targets = discovered.rows.filter(target => {
+      if ((target.message_notification_version ?? 0) !== 0 && !isMessageNotificationV1(target)) return false;
+      return target.push_provider === 'expo' ? isExpoPushToken(target.push_token)
+        : target.push_provider === 'fcm' && target.push_token.trim().length >= 20;
     });
+    counts.eligibleTargetCount = targets.length;
+    let attempted = 0;
+    let sent = 0;
+    for (const target of targets) {
+      if (!allowed(target)) { counts.matchedRelayExclusionCount++; continue; }
+      const senderLabel = input.senderUsername?.trim();
+      const legacyBody = input.senderPrivate ? 'Open Kryno to view it.' : senderLabel
+        ? `${senderLabel} sent you a private message.` : 'You have a new private message.';
+      const payload: ExpoPushPayload = {
+        title: 'New Kryno message',
+        body: isMessageNotificationV1(target) || target.message_private ? 'Open Kryno to view it.' : legacyBody,
+        channelId: 'kryno-messages',
+        data: { type: 'direct_message', messageId: input.messageId, recipientUserId: input.recipientUserId }
+      };
+      const guard: SubmissionGuard = {
+        check: async () => {
+          const current = await pool.query<PushTarget>(`${DIRECT_MESSAGE_PUSH_TARGETS_SQL}
+            and active.session_id = $5 and active.push_generation = $6
+            and active.push_provider = $7 and active.push_token = $8
+            and active.push_scope_version = $9 and active.message_notification_version = $10
+            and active.push_platform is not distinct from $11`,
+          [...params, target.session_id, target.push_generation, target.push_provider, target.push_token,
+            target.push_scope_version, target.message_notification_version ?? 0, target.push_platform]);
+          if (current.rows.length !== 1 || !allowed(current.rows[0])) {
+            counts.revalidatedOutCount++;
+            return false;
+          }
+          if (current.rows[0].message_private || isMessageNotificationV1(current.rows[0])) {
+            payload.body = 'Open Kryno to view it.';
+          }
+          return true;
+        },
+        submitted: () => { attempted++; }
+      };
+      try {
+        if (target.push_provider === 'fcm'
+          ? await this.sendFcmNotification(target, payload, guard)
+          : await this.sendExpoNotification(target, payload, guard)) sent++;
+      } catch (error) {
+        captureException(error, { surface: 'PushService', provider: target.push_provider,
+          platform: target.push_platform ?? 'unknown' });
+      }
+    }
+    return { attempted, sent, ...counts };
   }
 
   async sendCallInviteNotification(input: CallInvitePushInput) {
@@ -330,8 +406,9 @@ export class PushService {
     return result.rows.length === 1;
   }
 
-  private async sendExpoNotification(target: PushTarget, payload: ExpoPushPayload) {
-    if (!await this.isTargetCurrent(target, payload)) return false;
+  private async sendExpoNotification(target: PushTarget, payload: ExpoPushPayload, guard?: SubmissionGuard) {
+    if (!await (guard ? guard.check() : this.isTargetCurrent(target, payload))) return false;
+    guard?.submitted();
     const response = await fetch(EXPO_PUSH_ENDPOINT, {
       method: 'POST',
       headers: {
@@ -363,7 +440,7 @@ export class PushService {
     return true;
   }
 
-  private async sendFcmNotification(target: PushTarget, payload: ExpoPushPayload) {
+  private async sendFcmNotification(target: PushTarget, payload: ExpoPushPayload, guard?: SubmissionGuard) {
     const config = getFirebaseConfig();
     if (!config) {
       captureException(new Error('Firebase Cloud Messaging service account is not configured.'), {
@@ -375,7 +452,8 @@ export class PushService {
     }
 
     const accessToken = await getFirebaseAccessToken(config);
-    if (!await this.isTargetCurrent(target, payload)) return false;
+    if (!await (guard ? guard.check() : this.isTargetCurrent(target, payload))) return false;
+    guard?.submitted();
     const response = await fetch(`https://fcm.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}/messages:send`, {
       method: 'POST',
       headers: {

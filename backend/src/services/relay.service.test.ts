@@ -85,3 +85,51 @@ test('both close and error handlers guard call teardown with matching-socket rem
   const source = readFileSync(new URL('../routes/relay.routes.ts', import.meta.url), 'utf8');
   assert.equal(source.match(/auth && relayService\.unregisterConnection\(auth.sessionId, socket\)/g)?.length, 2);
 });
+
+test('family revocation closes only the matching connection and tears down once', () => {
+  const relay = new RelayService();
+  const current = socket();
+  let closes = 0, disconnects = 0;
+  current.close = () => { closes++; };
+  relay.registerConnection({ ...auth, tokenFamilyId: 'family-A' }, current, () => { disconnects++; });
+  assert.equal(relay.revokeLoginFamily(auth.sessionId, 'family-B'), false);
+  assert.equal(relay.isCurrentConnection(auth.sessionId, current), true);
+  assert.equal(relay.revokeLoginFamily(auth.sessionId, 'family-A'), true);
+  assert.equal(relay.revokeLoginFamily(auth.sessionId, 'family-A'), false);
+  assert.deepEqual([closes, disconnects], [1, 1]);
+  assert.equal(relay.sendEventToSession(auth.sessionId, {}), false);
+});
+
+test('late old-family logout cannot close the replacement connection', () => {
+  const relay = new RelayService();
+  const old = socket(), next = socket();
+  let closed = false;
+  next.close = () => { closed = true; };
+  relay.registerConnection({ ...auth, tokenFamilyId: 'old' }, old);
+  relay.registerConnection({ ...auth, tokenFamilyId: 'next' }, next);
+  assert.equal(relay.revokeLoginFamily(auth.sessionId, 'old'), false);
+  assert.equal(closed, false);
+  assert.equal(relay.sendEventToSession(auth.sessionId, {}), true);
+});
+
+test('expired outbound authority is removed before sending and tears down once', () => {
+  const relay = new RelayService();
+  const current = socket();
+  let disconnects = 0;
+  relay.registerConnection({ ...auth, tokenFamilyId: 'family', accessExpiresAt: Date.now() - 1 }, current,
+    () => { disconnects++; });
+  assert.equal(relay.sendEventToSession(auth.sessionId, {}), false);
+  assert.equal(current.sent.length, 0);
+  assert.equal(disconnects, 1);
+  assert.equal(relay.unregisterConnection(auth.sessionId, current), false);
+});
+
+test('revocation remains successful when call cleanup and transport close throw', () => {
+  const relay = new RelayService(); const current = socket();
+  current.close = () => { throw new Error('synthetic close failure'); };
+  relay.registerConnection({ ...auth, tokenFamilyId: 'family' }, current,
+    () => { throw new Error('synthetic cleanup failure'); });
+  assert.equal(relay.revokeLoginFamily(auth.sessionId, 'family'), true);
+  assert.equal(relay.sendEventToSession(auth.sessionId, {}), false);
+  assert.equal(relay.revokeLoginFamily(auth.sessionId, 'family'), false);
+});

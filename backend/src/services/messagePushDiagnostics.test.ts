@@ -37,11 +37,20 @@ test('preference skips are explicit instead of being mistaken for provider failu
   }
 });
 
-test('message service records dispatch and preference outcomes without changing relay exclusion', () => {
+test('message service records dispatch and preference outcomes with canonical target authority', () => {
   const source = readFileSync(new URL('./messages.service.ts', import.meta.url), 'utf8');
   assert.match(source, /messagePushDiagnostic\(messageId, excludeSessionIds\?\.length \?\? 0, result\)/);
-  assert.match(source, /messagePushDiagnostic\(persisted\.messageId, relayResult\.deliveredSessionIds\.length/);
+  assert.match(source, /messagePushDiagnostic\(row\.message_id, excluded\.length/);
   assert.match(source, /skipped: notificationPrefs\.muted \? 'muted' : 'focus-mode'/);
   assert.match(source, /skipped: 'dispatch-task-failed'/);
-  assert.match(source, /trySendMessagePush\(\s*persisted\.messageId,\s*persisted\.recipientUserId,\s*persisted\.senderUsername,\s*relayResult\.deliveredSessionIds,/);
+  assert.match(source, /trySendMessagePush\(row\.message_id, row\.recipient_user_id, row\.sender_user_id,\s*targets,/);
+});
+
+test('actual target/exclusion/stale counts are allowlisted and separate from input exclusions', () => {
+  const result = messagePushDiagnostic(id, 9, { attempted: 0, sent: 0,
+    intendedTargetCount: 2, eligibleTargetCount: 1, matchedRelayExclusionCount: 1, revalidatedOutCount: 0,
+    token: 'not-for-logs' } as Parameters<typeof messagePushDiagnostic>[2]);
+  assert.equal(result.relayExcludedCount, 9);
+  assert.equal(result.matchedRelayExclusionCount, 1);
+  assert.equal(JSON.stringify(result).includes('not-for-logs'), false);
 });

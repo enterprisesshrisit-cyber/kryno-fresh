@@ -73,6 +73,7 @@ const envSchema = z.object({
   MEDIA_STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
   REVENUECAT_WEBHOOK_SECRET: z.string().optional(),
   FIREBASE_PROJECT_ID: z.string().optional(),
+  MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
   FIREBASE_CLIENT_EMAIL: z.string().optional(),
   FIREBASE_PRIVATE_KEY: z.string().optional(),
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),

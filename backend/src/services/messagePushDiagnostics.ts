@@ -3,6 +3,10 @@ type PushOutcome = {
   sent?: number;
   disabled?: boolean;
   failed?: boolean;
+  intendedTargetCount?: number;
+  eligibleTargetCount?: number;
+  matchedRelayExclusionCount?: number;
+  revalidatedOutCount?: number;
   skipped?: 'muted' | 'focus-mode' | 'dispatch-task-failed';
 };
 
@@ -25,9 +29,13 @@ export function messagePushDiagnostic(messageId: string, excludedSessions: numbe
   const validId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(messageId);
   return {
     reason,
-    relayExcludedCount: count(excludedSessions),
+    relayExcludedCount: count(excludedSessions), // Historical field: input-list length, not SQL exclusions.
     attemptedCount: attempted,
     acceptedCount: accepted,
+    ...(outcome.intendedTargetCount !== undefined ? { intendedTargetCount: count(outcome.intendedTargetCount) } : {}),
+    ...(outcome.eligibleTargetCount !== undefined ? { eligibleTargetCount: count(outcome.eligibleTargetCount) } : {}),
+    ...(outcome.matchedRelayExclusionCount !== undefined ? { matchedRelayExclusionCount: count(outcome.matchedRelayExclusionCount) } : {}),
+    ...(outcome.revalidatedOutCount !== undefined ? { revalidatedOutCount: count(outcome.revalidatedOutCount) } : {}),
     ...(validId ? { messageTag: messageId.slice(-12).toLowerCase() } : {})
   };
 }

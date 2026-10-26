@@ -2,6 +2,8 @@ type RelayAuthContext = {
   userId: string;
   sessionId: string;
   deviceId: string;
+  tokenFamilyId?: string;
+  accessExpiresAt?: number;
 };
 
 type RelaySocket = {
@@ -26,6 +28,7 @@ type DirectRelayMessage = {
 
 type RelayConnection = RelayAuthContext & {
   socket: RelaySocket;
+  onRevoked?: () => void;
 };
 
 export class RelayService {
@@ -36,6 +39,25 @@ export class RelayService {
     return Array.from(this.sessionsByUser.get(userId) ?? []);
   }
 
+  isCurrentConnection(sessionId: string, socket: RelaySocket) {
+    return this.connectionsBySession.get(sessionId)?.socket === socket;
+  }
+
+  revokeLoginFamily(sessionId: string, familyId: string) {
+    const connection = this.connectionsBySession.get(sessionId);
+    if (!connection || connection.tokenFamilyId !== familyId) return false;
+    this.closeConnection(connection);
+    return true;
+  }
+
+  private closeConnection(connection: RelayConnection) {
+    if (!this.unregisterConnection(connection.sessionId, connection.socket)) return;
+    try { connection.onRevoked?.(); }
+    catch { console.warn('[KrynoRelay] call cleanup failed after authority removal'); }
+    try { connection.socket.close(); }
+    catch { console.warn('[KrynoRelay] transport close failed after authority removal'); }
+  }
+
   sendEventToSession(sessionId: string, payload: unknown) {
     const connection = this.connectionsBySession.get(sessionId);
     if (!connection) {
@@ -43,14 +65,15 @@ export class RelayService {
     }
 
     try {
-      if (connection.socket.readyState !== 1) {
-        this.unregisterConnection(sessionId, connection.socket);
+      if (connection.socket.readyState !== 1 ||
+          (connection.accessExpiresAt !== undefined && connection.accessExpiresAt <= Date.now())) {
+        this.closeConnection(connection);
         return false;
       }
       connection.socket.send(JSON.stringify(payload));
       return true;
     } catch {
-      this.unregisterConnection(sessionId, connection.socket);
+      this.closeConnection(connection);
       return false;
     }
   }
@@ -77,12 +100,13 @@ export class RelayService {
     };
   }
 
-  registerConnection(auth: RelayAuthContext, socket: RelaySocket) {
+  registerConnection(auth: RelayAuthContext, socket: RelaySocket, onRevoked?: () => void) {
     this.unregisterConnection(auth.sessionId);
 
     const connection: RelayConnection = {
       ...auth,
-      socket
+      socket,
+      onRevoked
     };
 
     this.connectionsBySession.set(auth.sessionId, connection);

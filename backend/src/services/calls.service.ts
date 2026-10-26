@@ -709,9 +709,14 @@ export class CallsService {
       recipient_user_id: string;
       connected_at: string | Date | null;
       ended_at: string | Date | null;
+      mode: CallMode;
+      media_provider: string;
+      caller_username: string;
+      expires_at: string | Date;
     }>(`
-      select state, end_reason, caller_user_id, recipient_user_id, connected_at, ended_at
-      from call_sessions where call_id = $1
+      select c.state, c.end_reason, c.caller_user_id, c.recipient_user_id, c.connected_at, c.ended_at,
+        c.mode, c.media_provider, u.username as caller_username, c.expires_at
+      from call_sessions c join users u on u.id = c.caller_user_id where c.call_id = $1
     `, [callId]);
     const call = result.rows[0];
     if (!call || (call.caller_user_id !== auth.userId && call.recipient_user_id !== auth.userId)) {
@@ -719,6 +724,11 @@ export class CallsService {
     }
     return {
       state: call.state,
+      direction: call.recipient_user_id === auth.userId ? 'incoming' : 'outgoing',
+      mode: call.mode,
+      mediaProvider: call.media_provider,
+      callerUsername: call.caller_username,
+      expiresAt: call.expires_at,
       endReason: call.end_reason,
       connectedAt: call.connected_at,
       endedAt: call.ended_at

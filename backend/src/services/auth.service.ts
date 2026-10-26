@@ -10,6 +10,7 @@ import { generateOtpCode, hmacSha256, sha256 } from '../utils/crypto.js';
 import { SlidingWindowRateLimiter } from '../utils/security.js';
 import { activatePushOwner, lockPushInstallation, retirePushOwner } from './push-ownership.service.js';
 import { authorizePushLogin } from './installation-credential.service.js';
+import { relayService } from './relay.service.js';
 
 type RequestMeta = {
   ip: string | null;
@@ -610,14 +611,17 @@ export class AuthService {
         refreshToken: replacementRefreshToken
       };
     });
-    if ('error' in result) throw result.error;
+    if ('error' in result) {
+      relayService.revokeLoginFamily(payload.sid, payload.family);
+      throw result.error;
+    }
     return result;
   }
 
   async logout(input: LogoutInput) {
     const refreshHash = sha256(input.refreshToken);
 
-    await withTransaction(async (client) => {
+    const retired = await withTransaction(async (client) => {
       const result = await client.query<{
         user_id: string; device_session_id: string; token_family_id: string; device_id: string;
       }>(
@@ -637,7 +641,11 @@ export class AuthService {
         [session.user_id, session.device_session_id, session.token_family_id]);
         await retirePushOwner(client, session.device_session_id, session.device_id, session.token_family_id);
       }
+      return session;
     });
+
+    // Never close a later login's replacement socket or revoke before commit.
+    if (retired) relayService.revokeLoginFamily(retired.device_session_id, retired.token_family_id);
 
     return { success: true };
   }

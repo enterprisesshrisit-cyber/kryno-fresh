@@ -12,6 +12,8 @@ const MAX_TTL_HOURS = 24 * 365;
 async function trySendMessagePush(
   messageId: string,
   recipientUserId: string,
+  senderUserId: string,
+  intendedSessionIds: string[],
   senderUsername: string | undefined,
   excludeSessionIds: string[] | undefined,
   senderPrivate: boolean
@@ -20,6 +22,8 @@ async function trySendMessagePush(
     const result = await pushService.sendDirectMessageNotification({
       messageId,
       recipientUserId,
+      senderUserId,
+      intendedSessionIds,
       senderUsername,
       senderPrivate,
       excludeSessionIds
@@ -322,241 +326,153 @@ export class MessagesService {
   }
 
   async sendMessage(input: SendMessageInput) {
+    // PostgreSQL canonicalizes UUIDs; preserve the same identity in locks and
+    // comparisons without changing opaque ciphertext or user-facing lookups.
+    input = { ...input, messageId: input.messageId.toLowerCase(),
+      senderUserId: input.senderUserId.toLowerCase(), senderSessionId: input.senderSessionId.toLowerCase(),
+      recipientDeviceSessionId: input.recipientDeviceSessionId?.toLowerCase() ?? null };
     if (input.messageType === 'couple_tool' && !input.coupleId) {
       throw new AppError(403, 'Use the active couple connection.', 'COUPLE_ACCESS_DENIED');
     }
     const persisted = await withTransaction(async (client) => {
-      const recipientResult = await client.query<{
-        id: string;
-      }>(
-        `
-          select id
-          from users
-          where id::text = $1 or lower(username) = lower($1)
-          limit 1
-        `,
-        [input.recipientLookup]
-      );
-
-      const recipient = recipientResult.rows[0];
-      const senderResult = await client.query<{ username: string }>(
-        `
-          select username
-          from users
-          where id = $1
-          limit 1
-        `,
-        [input.senderUserId]
-      );
-      const senderUsername = senderResult.rows[0]?.username;
-
-      if (!recipient) {
-        throw new AppError(404, 'Recipient not found.', 'RECIPIENT_NOT_FOUND');
-      }
-
+      const recipient = (await client.query<{ id: string }>(
+        'select id from users where id::text = $1 or lower(username) = lower($1) limit 1',
+        [input.recipientLookup])).rows[0];
+      if (!recipient) throw new AppError(404, 'Recipient not found.', 'RECIPIENT_NOT_FOUND');
       if (recipient.id === input.senderUserId) {
         throw new AppError(400, 'Cannot send a direct message to the same account.', 'SELF_MESSAGE_NOT_ALLOWED');
       }
-
       await this.assertNotBlocked(input.senderUserId, recipient.id);
-
       if (input.coupleId) {
         const pair = await requireCouple(client, input.senderUserId, input.coupleId);
         if (pair.partnerId !== recipient.id) throw new AppError(403, 'Partner connection changed.', 'COUPLE_ACCESS_DENIED');
       }
 
-      let targetDeviceSessionIds: string[];
-      if (input.recipientDeviceSessionId) {
-        const deviceResult = await client.query<{ id: string; user_id: string; trusted: boolean }>(
-          `
-            select id, user_id, trusted
-            from device_sessions
-            where id = $1
-            limit 1
-          `,
-          [input.recipientDeviceSessionId]
-        );
-
-        const recipientDevice = deviceResult.rows[0];
-
-        if (!recipientDevice || recipientDevice.user_id !== recipient.id || !recipientDevice.trusted) {
-          throw new AppError(400, 'Recipient device session is invalid.', 'INVALID_RECIPIENT_DEVICE');
-        }
-
-        targetDeviceSessionIds = [recipientDevice.id];
-      } else {
-        const deviceResult = await client.query<{ id: string }>(
-          `
-            select id
-            from device_sessions
-            where user_id = $1
-              and trusted = true
-            order by created_at asc
-          `,
-          [recipient.id]
-        );
-        targetDeviceSessionIds = deviceResult.rows.map((row) => row.id);
-      }
-
-      if (targetDeviceSessionIds.length === 0) {
-        throw new AppError(
-          409,
-          'Recipient does not have an available trusted device.',
-          'RECIPIENT_DEVICE_UNAVAILABLE'
-        );
-      }
-
-      const ttlHours = Math.min(Math.max(input.ttlHours ?? DEFAULT_QUEUE_TTL_HOURS, 1), MAX_TTL_HOURS);
-      const expiresAt = new Date(Date.now() + (input.temporaryControl ? 60_000 : ttlHours * 60 * 60 * 1000));
-      await client.query(
-        `
-          insert into direct_messages (
-            message_id,
-            sender_user_id,
-            sender_device_session_id,
-            recipient_user_id,
-            recipient_device_session_id,
-            message_type,
-            ciphertext,
-            encrypted_content_type,
-            client_created_at,
-            expires_at
-          )
-          values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz, $10::timestamptz)
-          on conflict (message_id)
-          do nothing
-        `,
-        [
-          input.messageId,
-          input.senderUserId,
-          input.senderSessionId,
-          recipient.id,
-          input.recipientDeviceSessionId ?? null,
-          input.messageType,
-          input.ciphertext,
-          input.encryptedContentType,
-          input.clientCreatedAt,
-          expiresAt.toISOString()
-        ]
-      );
-
-      const inserted = await client.query<{
-        message_id: string;
-        sender_user_id: string;
-        recipient_user_id: string;
-        recipient_device_session_id: string | null;
-        sender_device_session_id: string;
-        ciphertext: string;
-        encrypted_content_type: string;
-        message_type: string;
-        server_received_at: string;
-        expires_at: string;
-      }>(
-        `
-          select
-            message_id,
-            sender_user_id,
-            recipient_user_id,
-            recipient_device_session_id,
-            sender_device_session_id, ciphertext, encrypted_content_type, message_type,
-            server_received_at,
-            expires_at
-          from direct_messages
-          where message_id = $1::uuid
-          limit 1
-        `,
-        [input.messageId]
-      );
-
-      const row = inserted.rows[0];
-      if (!row || row.sender_user_id !== input.senderUserId || row.recipient_user_id !== recipient.id) {
-        throw new AppError(409, 'Message identifier is already in use.', 'MESSAGE_ID_CONFLICT');
-      }
-      if (input.coupleId && (row.sender_device_session_id !== input.senderSessionId
-        || row.recipient_device_session_id !== input.recipientDeviceSessionId
-        || row.ciphertext !== input.ciphertext || row.encrypted_content_type !== input.encryptedContentType
-        || row.message_type !== input.messageType)) {
-        throw new AppError(409, 'A shared update cannot change during retry.', 'MESSAGE_ID_CONFLICT');
-      }
-
-      await client.query(
-        `
-          insert into direct_message_deliveries (message_id, device_session_id)
-          select $1::uuid, unnest($2::uuid[])
-          on conflict (message_id, device_session_id) do nothing
-        `,
-        [input.messageId, targetDeviceSessionIds]
-      );
-
-      if (input.coupleId) {
-        await client.query('insert into couple_message_links(message_id, couple_id) values ($1, $2) on conflict do nothing', [input.messageId, input.coupleId]);
-      }
-
-      return {
-        messageId: row.message_id,
-        recipientUserId: row.recipient_user_id,
-        recipientDeviceSessionId: row.recipient_device_session_id,
-        serverReceivedAt: row.server_received_at,
-        expiresAt: row.expires_at,
-        senderUsername
+      // Serialize first acceptance and retries; only the first insert may create targets.
+      await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))', [`message-send:${input.messageId}`]);
+      type StoredMessage = {
+        message_id: string; sender_user_id: string; recipient_user_id: string;
+        sender_device_session_id: string; recipient_device_session_id: string | null;
+        message_type: string; ciphertext: string; encrypted_content_type: string;
+        client_created_at: string; server_received_at: string; expires_at: string;
+        notification_target_session_ids: string[] | null; notification_is_control: boolean | null;
       };
-    });
-
-    // Delivery happens only after the transaction commits, so a successful
-    // realtime send can never bypass durable ciphertext storage.
-    const relayResult = relayService.deliverDirectMessage({
-      recipientUserId: persisted.recipientUserId,
-      recipientDeviceSessionId: input.recipientDeviceSessionId ?? null,
-      payload: {
-        messageId: persisted.messageId,
-        senderUserId: input.senderUserId,
-        senderDeviceSessionId: input.senderSessionId,
-        recipientDeviceSessionId: input.recipientDeviceSessionId ?? null,
-        messageType: input.messageType,
-        ciphertext: input.ciphertext,
-        encryptedContentType: input.encryptedContentType,
-        clientCreatedAt: input.clientCreatedAt,
-        serverReceivedAt: persisted.serverReceivedAt,
-        expiresAt: persisted.expiresAt
+      const selectCanonical = `select message_id, sender_user_id, recipient_user_id,
+        sender_device_session_id, recipient_device_session_id, message_type, ciphertext,
+        encrypted_content_type, client_created_at, server_received_at, expires_at,
+        notification_target_session_ids, notification_is_control
+        from direct_messages where message_id = $1::uuid for update`;
+      let row = (await client.query<StoredMessage>(selectCanonical, [input.messageId])).rows[0];
+      let created = false;
+      const isControl = input.messageType === 'call_media_key' || !!input.temporaryControl;
+      if (!row) {
+        let targets: string[];
+        if (input.recipientDeviceSessionId) {
+          const device = (await client.query<{ id: string; user_id: string; trusted: boolean }>(
+            'select id, user_id, trusted from device_sessions where id = $1 limit 1',
+            [input.recipientDeviceSessionId])).rows[0];
+          if (!device || device.user_id !== recipient.id || !device.trusted) {
+            throw new AppError(400, 'Recipient device session is invalid.', 'INVALID_RECIPIENT_DEVICE');
+          }
+          targets = [device.id];
+        } else {
+          targets = (await client.query<{ id: string }>(
+            'select id from device_sessions where user_id = $1 and trusted = true order by created_at asc',
+            [recipient.id])).rows.map(device => device.id);
+        }
+        if (targets.length === 0) {
+          throw new AppError(409, 'Recipient does not have an available trusted device.', 'RECIPIENT_DEVICE_UNAVAILABLE');
+        }
+        const ttlHours = Math.min(Math.max(input.ttlHours ?? DEFAULT_QUEUE_TTL_HOURS, 1), MAX_TTL_HOURS);
+        const expiresAt = new Date(Date.now() + (input.temporaryControl ? 60_000 : ttlHours * 60 * 60 * 1000));
+        const inserted = await client.query(`insert into direct_messages (
+          message_id, sender_user_id, sender_device_session_id, recipient_user_id,
+          recipient_device_session_id, message_type, ciphertext, encrypted_content_type,
+          client_created_at, expires_at, notification_target_session_ids, notification_is_control)
+          values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz, $10::timestamptz, $11::uuid[], $12)
+          on conflict (message_id) do nothing returning message_id`,
+        [input.messageId, input.senderUserId, input.senderSessionId, recipient.id,
+          input.recipientDeviceSessionId ?? null, input.messageType, input.ciphertext,
+          input.encryptedContentType, input.clientCreatedAt, expiresAt.toISOString(), targets, isControl]);
+        created = inserted.rowCount === 1;
+        row = (await client.query<StoredMessage>(selectCanonical, [input.messageId])).rows[0];
+        if (created) {
+          await client.query(`insert into direct_message_deliveries (message_id, device_session_id)
+            select $1::uuid, unnest($2::uuid[]) on conflict (message_id, device_session_id) do nothing`,
+          [input.messageId, targets]);
+        }
       }
+      if (!row || row.sender_user_id !== input.senderUserId || row.recipient_user_id !== recipient.id
+        || row.sender_device_session_id !== input.senderSessionId
+        || row.recipient_device_session_id !== (input.recipientDeviceSessionId ?? null)
+        || row.ciphertext !== input.ciphertext || row.encrypted_content_type !== input.encryptedContentType
+        || row.message_type !== input.messageType
+        || new Date(row.client_created_at).getTime() !== new Date(input.clientCreatedAt).getTime()
+        || (row.notification_is_control !== null && row.notification_is_control !== isControl)) {
+        throw new AppError(409, 'A message cannot change during retry.', 'MESSAGE_ID_CONFLICT');
+      }
+      if (input.coupleId && created) {
+        await client.query('insert into couple_message_links(message_id, couple_id) values ($1, $2) on conflict do nothing',
+          [input.messageId, input.coupleId]);
+      }
+      // Legacy rows without an original snapshot cannot acquire notification authority on retry.
+      const intended = row.notification_target_session_ids ?? [];
+      const targets = new Date(row.expires_at).getTime() > Date.now()
+        ? (await client.query<{ device_session_id: string }>(`select dmd.device_session_id
+          from direct_message_deliveries dmd join device_sessions d on d.id = dmd.device_session_id
+          where dmd.message_id = $1::uuid and d.user_id = $2 and d.trusted = true
+            and dmd.device_session_id = any($3::uuid[]) and dmd.acked_at is null`,
+        [row.message_id, row.recipient_user_id, intended])).rows.map(target => target.device_session_id)
+        : [];
+      const sender = (await client.query<{ username: string }>(
+        'select username from users where id = $1 limit 1', [row.sender_user_id])).rows[0];
+      return { row, targets, senderUsername: sender?.username };
     });
 
-    const isCallControlMessage = input.messageType === 'call_media_key' || !!input.temporaryControl;
+    const { row, targets } = persisted;
+    const deliveredSessionIds = new Set<string>();
+    for (const target of targets) {
+      const result = relayService.deliverDirectMessage({
+        recipientUserId: row.recipient_user_id, recipientDeviceSessionId: target,
+        payload: {
+          messageId: row.message_id, senderUserId: row.sender_user_id,
+          senderDeviceSessionId: row.sender_device_session_id,
+          recipientDeviceSessionId: row.recipient_device_session_id,
+          messageType: row.message_type, ciphertext: row.ciphertext,
+          encryptedContentType: row.encrypted_content_type,
+          clientCreatedAt: new Date(row.client_created_at).toISOString(),
+          serverReceivedAt: new Date(row.server_received_at).toISOString(),
+          expiresAt: new Date(row.expires_at).toISOString()
+        }
+      });
+      for (const sessionId of result.deliveredSessionIds) {
+        if (sessionId === target) deliveredSessionIds.add(sessionId);
+      }
+    }
+    const excluded = [...deliveredSessionIds];
+    const isCallControlMessage = row.notification_is_control !== false;
     if (!isCallControlMessage) {
       void (async () => {
-        const notificationPrefs = await this.getRecipientNotificationPrefs(
-          persisted.recipientUserId,
-          input.senderUserId
-        );
+        const notificationPrefs = await this.getRecipientNotificationPrefs(row.recipient_user_id, row.sender_user_id);
         if (!notificationPrefs.muted && !notificationPrefs.focusMode) {
-          await trySendMessagePush(
-            persisted.messageId,
-            persisted.recipientUserId,
-            persisted.senderUsername,
-            relayResult.deliveredSessionIds,
-            notificationPrefs.privateMode
-          );
+          await trySendMessagePush(row.message_id, row.recipient_user_id, row.sender_user_id,
+            targets, persisted.senderUsername, excluded, notificationPrefs.privateMode);
         } else {
           console.info('[KrynoPush] Message dispatch outcome',
-            messagePushDiagnostic(persisted.messageId, relayResult.deliveredSessionIds.length,
+            messagePushDiagnostic(row.message_id, excluded.length,
               { skipped: notificationPrefs.muted ? 'muted' : 'focus-mode' }));
         }
       })().catch((error) => {
         console.info('[KrynoPush] Message dispatch outcome',
-          messagePushDiagnostic(persisted.messageId, relayResult.deliveredSessionIds.length,
-            { skipped: 'dispatch-task-failed' }));
+          messagePushDiagnostic(row.message_id, excluded.length, { skipped: 'dispatch-task-failed' }));
         captureException(error, { surface: 'MessagesService', reason: 'push_dispatch_failed' });
       });
     }
-
     return {
-      messageId: persisted.messageId,
-      recipientUserId: persisted.recipientUserId,
-      recipientDeviceSessionId:
-        relayResult.deliveredSessionIds[0] ?? persisted.recipientDeviceSessionId,
-      serverReceivedAt: persisted.serverReceivedAt,
-      expiresAt: persisted.expiresAt,
-      deliveryMode: relayResult.delivered ? 'live' : 'queued',
+      messageId: row.message_id, recipientUserId: row.recipient_user_id,
+      recipientDeviceSessionId: excluded[0] ?? row.recipient_device_session_id,
+      serverReceivedAt: row.server_received_at, expiresAt: row.expires_at,
+      deliveryMode: excluded.length > 0 ? 'live' : 'queued',
       pushNotification: { scheduled: !isCallControlMessage }
     };
   }

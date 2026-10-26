@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { pool } from '../db/pool.js';
 import { authService } from './auth.service.js';
+import { relayService } from './relay.service.js';
 
 function databaseFixture(t: TestContext, options: { owner?: boolean; token?: boolean; failRetire?: boolean } = {}) {
   const calls: { sql: string; params: unknown[] }[] = [];
@@ -53,4 +54,23 @@ test('failed push retirement rolls back logout rather than returning success', a
   const calls = databaseFixture(t, { failRetire: true });
   await assert.rejects(authService.logout({ refreshToken: 'fixture-token' }), /fixture retire failure/);
   assert.equal(calls.at(-1)!.sql, 'rollback');
+});
+
+test('logout revokes its relay family only after durable commit', async t => {
+  const calls = databaseFixture(t);
+  let revoked = false;
+  t.mock.method(relayService, 'revokeLoginFamily', (sessionId: string, familyId: string) => {
+    assert.equal(calls.at(-1)!.sql, 'commit');
+    assert.deepEqual([sessionId, familyId], ['fixture-session', 'fixture-family']);
+    revoked = true;
+    return true;
+  });
+  await authService.logout({ refreshToken: 'synthetic-refresh' });
+  assert.equal(revoked, true);
+});
+
+test('failed logout commit cannot prematurely close an authorized relay', async t => {
+  databaseFixture(t, { failRetire: true });
+  t.mock.method(relayService, 'revokeLoginFamily', () => { throw new Error('Must not revoke on rollback'); });
+  await assert.rejects(authService.logout({ refreshToken: 'synthetic-refresh' }), /fixture retire failure/);
 });

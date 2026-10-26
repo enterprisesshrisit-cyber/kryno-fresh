@@ -10,11 +10,15 @@ const pushTokenSchema = z
     platform: z.enum(['android', 'ios', 'web']),
     deviceId: z.string().min(3).max(128),
     pushScopeVersion: z.literal(1).optional(),
+    messageNotificationVersion: z.literal(1).optional(),
     installationCredential: z.string().regex(/^[0-9a-f]{64}$/).optional()
   })
   .strict()
   .refine((value) => !value.pushScopeVersion || (value.provider === 'fcm' && value.platform === 'android'),
-    'Scoped push requires native Android FCM.');
+    'Scoped push requires native Android FCM.')
+  .refine((value) => !value.messageNotificationVersion || (value.provider === 'fcm'
+    && value.platform === 'android' && value.pushScopeVersion === 1 && !!value.installationCredential),
+  'Message notifications require verified scoped Android FCM.');
 
 export async function registerPushTokenController(request: FastifyRequest, reply: FastifyReply) {
   const body = pushTokenSchema.parse(request.body);
@@ -30,7 +34,8 @@ export async function registerPushTokenController(request: FastifyRequest, reply
     pushToken: body.pushToken,
     platform: body.platform,
     ...(body.installationCredential ? { installationCredential: body.installationCredential } : {}),
-    ...(body.pushScopeVersion ? { pushScopeVersion: body.pushScopeVersion } : {})
+    ...(body.pushScopeVersion ? { pushScopeVersion: body.pushScopeVersion } : {}),
+    ...(body.messageNotificationVersion ? { messageNotificationVersion: body.messageNotificationVersion } : {})
   });
 
   request.log?.info({ provider: body.provider, platform: body.platform,

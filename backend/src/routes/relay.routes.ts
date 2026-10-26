@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify';
-import { authenticateAccessToken } from '../plugins/auth.js';
+import { authenticateAccessToken, assertActiveRelayAuthority, type AuthContext } from '../plugins/auth.js';
 import { pool } from '../db/pool.js';
 import { callsService, type ClientRelayCommand } from '../services/calls.service.js';
 import { relayService } from '../services/relay.service.js';
+import { AppError } from '../utils/errors.js';
 
 export type RelayAuthMessage = {
   type: 'auth';
@@ -55,35 +56,37 @@ export function isRelayAuthMessage(value: unknown): value is RelayAuthMessage {
 
 export async function relayRoutes(app: FastifyInstance) {
   app.get('/ws', { websocket: true }, async (socket, request) => {
-    let auth:
-      | {
-          userId: string;
-          sessionId: string;
-          deviceId: string;
-        }
-      | undefined;
+    let auth: AuthContext | undefined;
     let authenticated = false;
+    let authenticating = false;
+    let closed = false;
+    let expires: ReturnType<typeof setTimeout> | undefined;
     const authTimeout = setTimeout(() => {
-      if (!authenticated) {
-        socket.send(
+      if (!authenticated && !closed) {
+        closed = true;
+        try { socket.send(
           JSON.stringify({
             type: 'relay_error',
             message: 'Realtime relay authentication timed out.'
           })
-        );
-        socket.close();
+        ); } catch { /* A failed handshake transport must still be closed. */ }
+        try { socket.close(); } catch { /* The closed flag fences a late handshake. */ }
       }
     }, 5000);
 
     socket.on('close', () => {
+      closed = true;
       clearTimeout(authTimeout);
+      clearTimeout(expires);
       if (auth && relayService.unregisterConnection(auth.sessionId, socket)) {
         callsService.handleSessionDisconnect(auth.sessionId);
       }
     });
 
     socket.on('error', () => {
+      closed = true;
       clearTimeout(authTimeout);
+      clearTimeout(expires);
       if (auth && relayService.unregisterConnection(auth.sessionId, socket)) {
         callsService.handleSessionDisconnect(auth.sessionId);
       }
@@ -95,7 +98,7 @@ export async function relayRoutes(app: FastifyInstance) {
         const payload = JSON.parse(text) as RelayAuthMessage | RelayHeartbeatMessage | ClientRelayCommand;
 
         if (!authenticated) {
-          if (!isRelayAuthMessage(payload)) {
+          if (authenticating || !isRelayAuthMessage(payload)) {
             socket.send(
               JSON.stringify({
                 type: 'relay_error',
@@ -106,11 +109,28 @@ export async function relayRoutes(app: FastifyInstance) {
             return;
           }
 
-          auth = await authenticateAccessToken(payload.accessToken);
+          authenticating = true;
+          const verified = await authenticateAccessToken(payload.accessToken);
+          if (closed || socket.readyState !== 1) return;
+          auth = verified;
           authenticated = true;
           clearTimeout(authTimeout);
-          relayService.registerConnection(auth, socket);
+          relayService.registerConnection(auth, socket, () => {
+            closed = true;
+            clearTimeout(expires);
+            callsService.handleSessionDisconnect(verified.sessionId);
+          });
+          expires = setTimeout(() => {
+            if (relayService.isCurrentConnection(verified.sessionId, socket)) {
+              try { socket.send(JSON.stringify({ type: 'relay_error', code: 'ACCESS_TOKEN_EXPIRED',
+                message: 'Access token expired. Please refresh your session.' })); }
+              catch { /* Expiry revokes authority even if the transport fails. */ }
+              relayService.revokeLoginFamily(verified.sessionId, verified.tokenFamilyId);
+            }
+          }, Math.max(0, Math.min(verified.accessExpiresAt - Date.now(), 2_147_483_647)));
+          expires.unref();
           await callsService.handleSessionReconnect(auth);
+          if (closed || !relayService.isCurrentConnection(auth.sessionId, socket)) return;
           socket.send(
             JSON.stringify({
               type: 'relay_ready',
@@ -132,6 +152,12 @@ export async function relayRoutes(app: FastifyInstance) {
           socket.close();
           return;
         }
+        if (closed || !relayService.isCurrentConnection(auth.sessionId, socket)) {
+          socket.close();
+          return;
+        }
+        await assertActiveRelayAuthority(auth);
+        if (closed || !relayService.isCurrentConnection(auth.sessionId, socket)) return;
         if ((payload as RelayHeartbeatMessage).type === 'ping') {
           socket.send(
             JSON.stringify({
@@ -149,12 +175,19 @@ export async function relayRoutes(app: FastifyInstance) {
         }
         await callsService.handleCommand(auth, command as ClientRelayCommand);
       } catch (error) {
+        if (closed || socket.readyState !== 1) return;
+        const inactive = error instanceof AppError && error.statusCode === 401;
         socket.send(
           JSON.stringify({
             type: 'relay_error',
-            message: error instanceof Error ? error.message : 'Invalid relay command.'
+            message: inactive ? 'Access token expired. Please refresh your session.' :
+              error instanceof Error ? error.message : 'Invalid relay command.'
           })
         );
+        if (inactive) {
+          if (auth?.tokenFamilyId) relayService.revokeLoginFamily(auth.sessionId, auth.tokenFamilyId);
+          else socket.close();
+        }
       }
     });
   });

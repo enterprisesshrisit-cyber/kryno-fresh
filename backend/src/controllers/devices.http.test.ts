@@ -21,8 +21,8 @@ test('real app HTTP push route: auth, scoped contract and safe inherited errors'
   const redis = env.REDIS_URL;
   env.REDIS_URL = undefined;
   t.mock.method(tokenService, 'verifyAccessToken', async () => ({ sub: 'fixture-user', sid: 'fixture-session',
-    did: 'fixture-device', family: 'fixture-family' }));
-  t.mock.method(pool, 'query', async () => ({ rows: [{ user_id: 'fixture-user', device_id: 'fixture-device', trusted: true }] }));
+    did: 'fixture-device', family: 'fixture-family', type: 'access', exp: Math.floor(Date.now() / 1000) + 600 }));
+  t.mock.method(pool, 'query', async () => ({ rows: [{ user_id: 'fixture-user', device_id: 'fixture-device', trusted: true, active_family: true }] }));
   let failure: Error | undefined;
   let accepted: unknown;
   t.mock.method(devicesService, 'registerPushToken', async (input: unknown) => {

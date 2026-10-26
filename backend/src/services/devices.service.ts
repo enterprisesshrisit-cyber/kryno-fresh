@@ -14,6 +14,7 @@ type RegisterPushTokenInput = {
   pushToken: string;
   platform: 'android' | 'ios' | 'web';
   pushScopeVersion?: 1;
+  messageNotificationVersion?: 1;
   installationCredential?: string;
 };
 
@@ -21,6 +22,11 @@ const MISSING_SCHEMA_CODES = ['42703', '42P01'];
 
 export class DevicesService {
   async registerPushToken(input: RegisterPushTokenInput) {
+    if (input.messageNotificationVersion !== undefined && (input.messageNotificationVersion !== 1
+      || input.provider !== 'fcm' || input.platform !== 'android' || input.pushScopeVersion !== 1
+      || !input.installationCredential)) {
+      throw new AppError(400, 'Message notifications require verified scoped Android FCM.', 'MESSAGE_NOTIFICATION_UNSUPPORTED');
+    }
     if (input.pushScopeVersion && (input.provider !== 'fcm' || input.platform !== 'android')) {
       throw new AppError(400, 'Scoped push requires Android FCM.', 'PUSH_SCOPE_UNSUPPORTED');
     }
@@ -67,6 +73,7 @@ export class DevicesService {
           push_token_updated_at: string;
           push_owner_generation: string;
           push_scope_version: number;
+          message_notification_version: number;
         }>(
           `
           update device_sessions
@@ -76,6 +83,7 @@ export class DevicesService {
             push_platform = $3,
             push_owner_generation = $7,
             push_scope_version = $8,
+            message_notification_version = $9,
             push_token_updated_at = now(),
             last_seen_at = now(),
             updated_at = now()
@@ -83,10 +91,11 @@ export class DevicesService {
             and user_id = $5
             and device_id = $6
             and trusted = true
-          returning push_provider, push_platform, push_token_updated_at, push_owner_generation, push_scope_version
+          returning push_provider, push_platform, push_token_updated_at, push_owner_generation, push_scope_version,
+            message_notification_version
         `,
           [input.provider, input.pushToken, input.platform, input.sessionId, input.userId, input.deviceId,
-            owner.rows[0].generation, input.pushScopeVersion ?? 0]
+            owner.rows[0].generation, input.pushScopeVersion ?? 0, input.messageNotificationVersion ?? 0]
         );
       });
     } catch (error) {
@@ -118,7 +127,8 @@ export class DevicesService {
       platform: row.push_platform,
       tokenUpdatedAt: row.push_token_updated_at,
       pushGeneration: row.push_owner_generation,
-      pushScopeVersion: row.push_scope_version
+      pushScopeVersion: row.push_scope_version,
+      messageNotificationVersion: row.message_notification_version
     };
   }
 }
