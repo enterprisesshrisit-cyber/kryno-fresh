@@ -363,13 +363,13 @@ export class CallsService {
         `
           update call_sessions
           set
-            state = $2,
+            state = $2::text,
             accepted_device_session_id = coalesce($3::uuid, accepted_device_session_id),
-            accepted_at = case when $2 in ('connecting', 'connected') and accepted_at is null then now() else accepted_at end,
-            connected_at = case when $2 = 'connected' and connected_at is null then now() else connected_at end,
-            ended_at = case when $2 in ('ended', 'missed', 'declined', 'cancelled', 'expired', 'unavailable', 'failed') then now() else ended_at end,
+            accepted_at = case when $2::text in ('connecting', 'connected') and accepted_at is null then now() else accepted_at end,
+            connected_at = case when $2::text = 'connected' and connected_at is null then now() else connected_at end,
+            ended_at = case when $2::text in ('ended', 'missed', 'declined', 'cancelled', 'expired', 'unavailable', 'failed') then now() else ended_at end,
             end_reason = coalesce($4, end_reason),
-            expires_at = case when $2 in ('connecting', 'connected') then greatest(expires_at, now() + interval '4 hours') else expires_at end,
+            expires_at = case when $2::text in ('connecting', 'connected') then greatest(expires_at, now() + interval '4 hours') else expires_at end,
             updated_at = now()
           where call_id = $1 and state in ('ringing', 'connecting', 'connected')
         `,
@@ -1231,8 +1231,9 @@ export class CallsService {
       return;
     }
 
+    const persisted = await this.persistCallState(call, 'connected');
+    if (!persisted || this.callsById.get(call.callId) !== call) return;
     call.state = 'connected';
-    await this.persistCallState(call, 'connected');
     logCallEvent('connected', {
       callId: call.callId,
       sessionId: auth.sessionId,

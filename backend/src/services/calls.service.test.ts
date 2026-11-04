@@ -376,4 +376,44 @@ test('late connected events cannot resurrect a durably ended call', async (t) =>
     return { rows: [], rowCount: 0 };
   });
   await service.handleCommand(recipient, { type: 'call_connected', callId });
+  assert.equal(active.state, 'connecting');
 });
+
+test('failed connected persistence does not publish a connected state or success log', async (t) => {
+  const service = new CallsService();
+  const active = {
+    callId, callerSessionId: caller.sessionId, acceptedSessionId: recipient.sessionId,
+    state: 'connecting', mediaProvider: 'livekit', roomName: `kryno-audio-${callId}`
+  };
+  (service as unknown as { callsById: Map<string, unknown> }).callsById.set(callId, active);
+  t.mock.method(pool, 'query', async () => { throw new Error('fixture database unavailable'); });
+  const log = t.mock.method(console, 'log', () => {});
+  await service.handleCommand(recipient, { type: 'call_connected', callId });
+  assert.equal(active.state, 'connecting');
+  assert.equal(log.mock.calls.some(call => call.arguments[0] === '[KrynoCalls] connected'), false);
+});
+
+for (const replacement of [false, true]) {
+  test(`pending connected persistence cannot mutate ${replacement ? 'a replacement' : 'a removed'} call`, async (t) => {
+    const service = new CallsService();
+    const active = {
+      callId, callerSessionId: caller.sessionId, acceptedSessionId: recipient.sessionId,
+      state: 'connecting', mediaProvider: 'livekit', roomName: `kryno-audio-${callId}`
+    };
+    const calls = (service as unknown as { callsById: Map<string, unknown> }).callsById;
+    calls.set(callId, active);
+    let complete!: (value: { rows: unknown[]; rowCount: number }) => void;
+    const pending = new Promise<{ rows: unknown[]; rowCount: number }>(resolve => { complete = resolve; });
+    t.mock.method(pool, 'query', async () => pending);
+    const log = t.mock.method(console, 'log', () => {});
+    const update = service.handleCommand(recipient, { type: 'call_connected', callId });
+    const next = { ...active };
+    if (replacement) calls.set(callId, next);
+    else calls.delete(callId);
+    complete({ rows: [], rowCount: 1 });
+    await update;
+    assert.equal(active.state, 'connecting');
+    assert.equal(next.state, 'connecting');
+    assert.equal(log.mock.calls.some(call => call.arguments[0] === '[KrynoCalls] connected'), false);
+  });
+}
