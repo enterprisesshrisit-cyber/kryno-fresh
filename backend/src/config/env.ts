@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { messageRelayWakeTargetsSchema } from './messageRelayWake.js';
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const envPath = resolve(currentDir, '..', '..', '.env');
@@ -74,6 +75,7 @@ const envSchema = z.object({
   REVENUECAT_WEBHOOK_SECRET: z.string().optional(),
   FIREBASE_PROJECT_ID: z.string().optional(),
   MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
+  MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS: messageRelayWakeTargetsSchema,
   FIREBASE_CLIENT_EMAIL: z.string().optional(),
   FIREBASE_PRIVATE_KEY: z.string().optional(),
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),

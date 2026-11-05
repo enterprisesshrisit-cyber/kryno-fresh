@@ -23,7 +23,10 @@ export function messagePushDiagnostic(messageId: string, excludedSessions: numbe
   const reason = outcome.skipped ?? (outcome.disabled ? 'schema-unavailable'
     : outcome.failed ? 'dispatch-failed'
     : invalidCounts ? 'invalid-outcome'
-    : attempted === 0 ? 'no-eligible-targets'
+    : attempted === 0 ? (count(outcome.eligibleTargetCount) === 0 ? 'no-eligible-targets'
+      : count(outcome.revalidatedOutCount) > 0 ? 'target-invalidated'
+      : count(outcome.matchedRelayExclusionCount) === count(outcome.eligibleTargetCount) ? 'relay-excluded'
+      : 'provider-not-submitted')
     : accepted === attempted ? 'provider-accepted'
     : accepted > 0 ? 'partial-acceptance' : 'not-accepted');
   const validId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(messageId);

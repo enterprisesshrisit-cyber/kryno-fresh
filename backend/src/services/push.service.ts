@@ -253,7 +253,10 @@ export class PushService {
     }
     const excluded = new Set(input.excludeSessionIds ?? []);
     const allowed = (target: PushTarget) => !excluded.has(target.session_id)
-      || (env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED && isMessageNotificationV1(target));
+      || (env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED && isMessageNotificationV1(target)
+        && env.MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS.some(pair =>
+          pair.recipientUserId === input.recipientUserId.toLowerCase()
+          && pair.deviceSessionId === target.session_id.toLowerCase()));
     const targets = discovered.rows.filter(target => {
       if ((target.message_notification_version ?? 0) !== 0 && !isMessageNotificationV1(target)) return false;
       return target.push_provider === 'expo' ? isExpoPushToken(target.push_token)

@@ -52,5 +52,18 @@ test('actual target/exclusion/stale counts are allowlisted and separate from inp
     token: 'not-for-logs' } as Parameters<typeof messagePushDiagnostic>[2]);
   assert.equal(result.relayExcludedCount, 9);
   assert.equal(result.matchedRelayExclusionCount, 1);
+  assert.equal(result.reason, 'relay-excluded');
   assert.equal(JSON.stringify(result).includes('not-for-logs'), false);
+});
+
+test('zero provider attempts distinguish actual relay exclusions, revalidation and pre-submit failure', () => {
+  for (const [outcome, expected] of [
+    [{ eligibleTargetCount: 1, matchedRelayExclusionCount: 1 }, 'relay-excluded'],
+    [{ eligibleTargetCount: 1, revalidatedOutCount: 1 }, 'target-invalidated'],
+    [{ eligibleTargetCount: 2, matchedRelayExclusionCount: 1, revalidatedOutCount: 1 }, 'target-invalidated'],
+    [{ eligibleTargetCount: 1, matchedRelayExclusionCount: 0 }, 'provider-not-submitted'],
+    [{ eligibleTargetCount: 0, matchedRelayExclusionCount: 0 }, 'no-eligible-targets']
+  ] as const) {
+    assert.equal(messagePushDiagnostic(id, 99, { ...outcome, attempted: 0, sent: 0 }).reason, expected);
+  }
 });

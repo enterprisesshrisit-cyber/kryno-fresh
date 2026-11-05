@@ -81,12 +81,15 @@ const fixtureKey = generateKeyPairSync('rsa', { modulusLength: 2048,
 
 function fcmFixture(t: TestContext) {
   const old = { project: env.FIREBASE_PROJECT_ID, email: env.FIREBASE_CLIENT_EMAIL, key: env.FIREBASE_PRIVATE_KEY,
-    enabled: env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED };
+    enabled: env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED, targets: env.MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS };
   env.FIREBASE_PROJECT_ID = 'fixture-no-real-project';
   env.FIREBASE_CLIENT_EMAIL = 'fixture@example.invalid';
   env.FIREBASE_PRIVATE_KEY = fixtureKey;
+  env.MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS = [{ recipientUserId: directInput.recipientUserId,
+    deviceSessionId: target.session_id }];
   t.after(() => { env.FIREBASE_PROJECT_ID = old.project; env.FIREBASE_CLIENT_EMAIL = old.email;
-    env.FIREBASE_PRIVATE_KEY = old.key; env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED = old.enabled; });
+    env.FIREBASE_PRIVATE_KEY = old.key; env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED = old.enabled;
+    env.MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS = old.targets; });
   const requests: Record<string, any>[] = [];
   t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
     if (url === 'https://oauth2.googleapis.com/token') return new Response(JSON.stringify({ access_token: 'fixture-oauth-not-real', expires_in: 3600 }));
@@ -108,6 +111,41 @@ test('empty or missing intended targets fail closed without querying or submitti
 
 test('default relay-wake policy is OFF', () => {
   assert.equal(env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED, false);
+  assert.deepEqual(env.MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS, []);
+});
+
+test('relay-wake requires the exact account/session canary pair even when enabled', async t => {
+  const requests = fcmFixture(t);
+  const row = { ...target, push_provider: 'fcm', push_scope_version: 1, message_notification_version: 1,
+    push_token: 'fixture-fcm-token-with-no-real-device' };
+  t.mock.method(pool, 'query', async () => ({ rows: [row] }));
+  env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED = true;
+  for (const targets of [[], [{ recipientUserId: 'other-account', deviceSessionId: row.session_id }],
+    [{ recipientUserId: directInput.recipientUserId, deviceSessionId: 'other-session' }],
+    [{ recipientUserId: 'other-account', deviceSessionId: row.session_id },
+      { recipientUserId: directInput.recipientUserId, deviceSessionId: 'other-session' }]]) {
+    env.MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS = targets;
+    const outcome = await pushService.sendDirectMessageNotification({ ...directInput, excludeSessionIds: [row.session_id] });
+    assert.equal(outcome.matchedRelayExclusionCount, 1);
+    assert.equal(outcome.attempted, 0);
+  }
+  assert.equal(requests.length, 0);
+});
+
+test('removing a canary before submission cancels a relay-bypassing wake', async t => {
+  const requests = fcmFixture(t);
+  const row = { ...target, push_provider: 'fcm', push_scope_version: 1, message_notification_version: 1,
+    push_token: 'fixture-fcm-token-with-no-real-device' };
+  let query = 0;
+  t.mock.method(pool, 'query', async () => {
+    if (++query > 1) env.MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS = [];
+    return { rows: [row] };
+  });
+  env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED = true;
+  const outcome = await pushService.sendDirectMessageNotification({ ...directInput, excludeSessionIds: [row.session_id] });
+  assert.equal(outcome.attempted, 0);
+  assert.equal(outcome.revalidatedOutCount, 1);
+  assert.equal(requests.length, 0);
 });
 
 test('relay/capability/scope/provider/gate cross-product preserves legacy exclusion', async t => {

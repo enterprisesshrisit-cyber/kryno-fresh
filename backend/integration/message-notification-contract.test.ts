@@ -9,7 +9,7 @@ import { MessagesService } from '../src/services/messages.service.js';
 import { devicesService } from '../src/services/devices.service.js';
 import { pushService, DIRECT_MESSAGE_PUSH_TARGETS_SQL } from '../src/services/push.service.js';
 import { activatePushOwner, retirePushOwner } from '../src/services/push-ownership.service.js';
-import { relayService } from '../src/services/relay.service.js';
+import { relayService, RelayService } from '../src/services/relay.service.js';
 import { sha256 } from '../src/utils/crypto.js';
 
 test('isolated localhost notification contract: migration, canonical retries, targeting and registration races', { timeout: 120000 }, async t => {
@@ -221,6 +221,7 @@ test('isolated localhost notification contract: migration, canonical retries, ta
     });
     const pushInput = { messageId: input.messageId, recipientUserId: recipient, senderUserId: sender,
       intendedSessionIds: [d1, d2, dc], senderUsername: 'SENSITIVE-LABEL', excludeSessionIds: [d1] };
+    env.MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS = [{ recipientUserId: recipient, deviceSessionId: d1 }];
     await t.test('actual SQL excludes unrelated installations even if delivery rows were appended', async () => {
       const rows = (await realQuery(DIRECT_MESSAGE_PUSH_TARGETS_SQL, [recipient, [d1, d2, dc], input.messageId, sender])).rows;
       assert.deepEqual(rows.map(row => row.session_id), [d1]);
@@ -230,6 +231,72 @@ test('isolated localhost notification contract: migration, canonical retries, ta
       const result = await pushService.sendDirectMessageNotification(pushInput);
       assert.equal(result.attempted, 1); assert.equal(result.sent, 1);
       assert.equal(wires.at(-1)!.includes('SENSITIVE-LABEL'), false);
+    });
+
+    await t.test('unconsumed OPEN relay write cannot suppress an authorized canary wake or acknowledge ciphertext', async child => {
+      const sockets = new RelayService();
+      const envelopes: string[] = [];
+      sockets.registerConnection({ userId: recipient, sessionId: d1, deviceId: `fixture-${d1}` }, {
+        readyState: 1, send: value => { envelopes.push(value); }, close() {}, on() {}
+      });
+      child.mock.method(relayService, 'deliverDirectMessage', value => sockets.deliverDirectMessage(value));
+      const realPush = pushService.sendDirectMessageNotification.bind(pushService);
+      type Outcome = Awaited<ReturnType<typeof realPush>>;
+      let finish!: (outcome: Outcome) => void;
+      let fail!: (error: unknown) => void;
+      child.mock.method(pushService, 'sendDirectMessageNotification', async value => {
+        try { const outcome = await realPush(value); finish(outcome); return outcome; }
+        catch (error) { fail(error); throw error; }
+      });
+      const message = { ...input, messageId: randomUUID() };
+      const dispatch = async () => {
+        const completion = new Promise<Outcome>((resolve, reject) => { finish = resolve; fail = reject; });
+        const result = await service.sendMessage(message);
+        assert.equal(result.deliveryMode, 'live'); // Socket-write result, not recipient receipt.
+        return completion;
+      };
+      const original = { enabled: env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED,
+        targets: env.MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS };
+      child.after(() => { env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED = original.enabled;
+        env.MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS = original.targets; });
+      const pair = { recipientUserId: recipient, deviceSessionId: d1 };
+      const cases = [
+        { name: 'deployed OFF failure', enabled: false, targets: [pair], version: 1, attempts: 0 },
+        { name: 'empty canary', enabled: true, targets: [], version: 1, attempts: 0 },
+        { name: 'wrong account', enabled: true, targets: [{ ...pair, recipientUserId: other }], version: 1, attempts: 0 },
+        { name: 'wrong session', enabled: true, targets: [{ ...pair, deviceSessionId: d2 }], version: 1, attempts: 0 },
+        { name: 'legacy not promoted', enabled: true, targets: [pair], version: undefined, attempts: 0 },
+        { name: 'scoped compatible canary', enabled: true, targets: [pair], version: 1, attempts: 1 }
+      ] as const;
+      for (const scenario of cases) {
+        await register(d1, scenario.version);
+        env.MESSAGE_NOTIFICATION_RELAY_WAKE_ENABLED = scenario.enabled;
+        env.MESSAGE_NOTIFICATION_RELAY_WAKE_TARGETS = [...scenario.targets];
+        const before = wires.length;
+        const result = await dispatch();
+        assert.equal(result.intendedTargetCount, 1, scenario.name);
+        assert.equal(result.eligibleTargetCount, 1, scenario.name);
+        assert.equal(result.matchedRelayExclusionCount, 1 - scenario.attempts, scenario.name);
+        assert.equal(result.attempted, scenario.attempts, scenario.name);
+        assert.equal(result.sent, scenario.attempts, scenario.name);
+        assert.equal(wires.length - before, scenario.attempts, scenario.name);
+      }
+      assert.equal(envelopes.length, cases.length);
+      assert.ok(envelopes.every(value => JSON.parse(value).message.ciphertext === message.ciphertext));
+      const wire = JSON.parse(wires.at(-1)!);
+      assert.equal(wire.message.token, `fixture-fcm-token-${d1}`);
+      assert.equal(wire.message.data.messageId, message.messageId);
+      assert.equal(wire.message.data.recipientUserId, recipient);
+      assert.equal(wire.message.data.pushScopeVersion, '1');
+      assert.equal(wire.message.android.priority, 'HIGH');
+      assert.equal('notification' in wire.message, false);
+      for (const sensitive of [message.ciphertext, 'SENSITIVE-LABEL', d2, dc]) {
+        assert.equal(wires.at(-1)!.includes(sensitive), false);
+      }
+      const stored = (await admin.query('select ciphertext from direct_messages where message_id=$1', [message.messageId])).rows;
+      assert.deepEqual(stored, [{ ciphertext: message.ciphertext }]);
+      const deliveries = (await admin.query('select device_session_id,acked_at from direct_message_deliveries where message_id=$1', [message.messageId])).rows;
+      assert.deepEqual(deliveries, [{ device_session_id: d1, acked_at: null }]);
     });
 
     await t.test('same-generation capability omission and scope downgrade suppress in-flight discovery', async child => {
