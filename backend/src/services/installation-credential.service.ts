@@ -23,6 +23,12 @@ function verifyHash(stored: string, actual: string) {
   }
 }
 
+export async function verifyExistingInstallationProof(client: PoolClient, deviceId: string, credential: string) {
+  const actual = credentialHash(credential);
+  const stored = await storedHash(client, deviceId);
+  verifyHash(stored ?? '', actual);
+}
+
 // Caller holds the installation lock. Registration may enroll only after the
 // current signed login family has been verified by DevicesService.
 export async function verifyOrEnrollInstallation(client: PoolClient, deviceId: string, credential: string) {
@@ -43,12 +49,12 @@ export async function requireInstallationProof(client: PoolClient, deviceId: str
 // Password authentication alone does not prove ownership of somebody else's
 // installation ID. Legacy logins may authenticate, but cannot move push authority.
 export async function authorizePushLogin(client: PoolClient, userId: string, deviceId: string, credential?: string) {
-  if (!credential) return false;
+  if (!credential) return 'missing';
   const actual = credentialHash(credential);
   const stored = await storedHash(client, deviceId);
   if (stored) {
     verifyHash(stored, actual);
-    return true;
+    return 'verified';
   }
   const owner = await client.query<{ user_id: string }>(`select d.user_id from push_installation_owners o
     join device_sessions d on d.id = o.device_session_id where o.device_id = $1`, [deviceId]);
@@ -60,5 +66,5 @@ export async function authorizePushLogin(client: PoolClient, userId: string, dev
   }
   await client.query('insert into push_installation_credentials (device_id, credential_hash) values ($1,$2)',
     [deviceId, actual]);
-  return true;
+  return 'enrolled';
 }

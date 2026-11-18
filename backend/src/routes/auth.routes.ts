@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import {
   loginController,
   logoutController,
+  recoverableRefreshController,
   refreshController,
   resendVerificationController,
   requestPasswordResetController,
@@ -18,5 +19,6 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/request-password-reset', requestPasswordResetController);
   app.post('/reset-password', resetPasswordController);
   app.post('/refresh', refreshController);
+  app.post('/refresh/recoverable', recoverableRefreshController);
   app.post('/logout', logoutController);
 }

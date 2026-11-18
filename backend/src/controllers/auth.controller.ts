@@ -21,7 +21,8 @@ const loginSchema = z.object({
   device_id: z.string().min(8).max(128),
   device_name: z.string().max(120).optional(),
   device_public_key: z.string().min(16),
-  installation_credential: z.string().regex(/^[0-9a-f]{64}$/).optional()
+  installation_credential: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  refresh_recovery_version: z.literal(1).optional()
 });
 
 const verifyEmailSchema = z.object({
@@ -48,6 +49,13 @@ const refreshSchema = z.object({
     refresh_token: refreshToken,
     device_id: body.device_id
   };
+});
+
+const recoverableRefreshSchema = z.strictObject({
+  refresh_token: z.string().min(32).max(4096),
+  device_id: z.string().min(8).max(128),
+  installation_credential: z.string().regex(/^[0-9a-f]{64}$/),
+  attempt_id: z.uuidv4()
 });
 
 const logoutSchema = z.object({
@@ -125,6 +133,7 @@ export async function loginController(request: FastifyRequest, reply: FastifyRep
       password: body.password,
       deviceId: body.device_id,
       installationCredential: body.installation_credential,
+      refreshRecoveryVersion: body.refresh_recovery_version,
       deviceName: body.device_name,
       devicePublicKey: body.device_public_key
     },
@@ -148,6 +157,19 @@ export async function refreshController(request: FastifyRequest, reply: FastifyR
     },
     requestMeta(request)
   );
+  return reply.code(200).send(result);
+}
+
+export async function recoverableRefreshController(request: FastifyRequest, reply: FastifyReply) {
+  reply.header('Cache-Control', 'no-store');
+  const parsed = recoverableRefreshSchema.safeParse(request.body);
+  if (!parsed.success) throw new AppError(400, 'Invalid sign-in recovery request.', 'VALIDATION_ERROR');
+  const body = parsed.data;
+  const result = await authService.refresh({
+    refreshToken: body.refresh_token,
+    deviceId: body.device_id,
+    recovery: { attemptId: body.attempt_id, installationCredential: body.installation_credential }
+  }, requestMeta(request));
   return reply.code(200).send(result);
 }
 

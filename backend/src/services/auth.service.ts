@@ -10,6 +10,10 @@ import { generateOtpCode, hmacSha256, sha256 } from '../utils/crypto.js';
 import { SlidingWindowRateLimiter } from '../utils/security.js';
 import { activatePushOwner, lockPushInstallation, retirePushOwner } from './push-ownership.service.js';
 import { authorizePushLogin } from './installation-credential.service.js';
+import {
+  isRefreshRecoveryTarget, recoverRefresh, recoveryUnavailable, refreshRecoveryAttempt,
+  signRecoverableRefresh, verifyRefreshRecoveryOwner, type RefreshRecoveryInput
+} from './refresh-recovery.service.js';
 import { relayService } from './relay.service.js';
 
 type RequestMeta = {
@@ -33,11 +37,13 @@ type SignupInput = {
 type LoginInput = {
   identifier: string;
   password: string;
+  refreshRecoveryVersion?: 1;
 } & DeviceInput;
 
 type RefreshInput = {
   refreshToken: string;
   deviceId: string;
+  recovery?: RefreshRecoveryInput;
 };
 
 type LogoutInput = {
@@ -101,7 +107,7 @@ async function upsertDeviceSession(
   meta: RequestMeta
 ) {
   await lockPushInstallation(client, device.deviceId);
-  const canOwnPush = await authorizePushLogin(client, userId, device.deviceId, device.installationCredential);
+  const proof = await authorizePushLogin(client, userId, device.deviceId, device.installationCredential);
   const existingSession = await client.query<{ id: string }>(
     `
       select id
@@ -145,7 +151,8 @@ async function upsertDeviceSession(
 
   return {
     sessionId: result.rows[0].id,
-    canOwnPush,
+    canOwnPush: proof !== 'missing',
+    hasExistingInstallationProof: proof === 'verified',
     isNewDevice: !existingSession.rows[0]
   };
 }
@@ -156,11 +163,15 @@ async function createRefreshSession(
   sessionId: string,
   deviceId: string,
   meta: RequestMeta,
-  canOwnPush: boolean
+  canOwnPush: boolean,
+  requestedRecovery?: 1
 ) {
   const tokenId = crypto.randomUUID();
   const familyId = crypto.randomUUID();
-  const refreshToken = await tokenService.signRefreshToken({ userId, sessionId, deviceId }, tokenId, familyId);
+  const installation = { userId, sessionId, deviceId };
+  const refreshRecoveryVersion =
+    requestedRecovery === 1 && canOwnPush && isRefreshRecoveryTarget(installation) ? 1 as const : undefined;
+  const refreshToken = await tokenService.signRefreshToken({ ...installation, refreshRecoveryVersion }, tokenId, familyId);
   const refreshHash = sha256(refreshToken);
   const expiresAt = new Date(Date.now() + env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
 
@@ -184,7 +195,7 @@ async function createRefreshSession(
   if (canOwnPush) await activatePushOwner(client, sessionId, deviceId, familyId);
   const accessToken = await tokenService.signAccessToken({ userId, sessionId, deviceId, tokenFamilyId: familyId });
 
-  return { accessToken, refreshToken };
+  return { accessToken, refreshToken, ...(refreshRecoveryVersion ? { refreshRecoveryVersion } : {}) };
 }
 
 async function createEmailVerificationCode(client: pg.PoolClient, userId: string) {
@@ -444,7 +455,8 @@ export class AuthService {
 
     const loginResult = await withTransaction(async (client) => {
       const deviceSession = await upsertDeviceSession(client, user.id, input, meta);
-      const tokens = await createRefreshSession(client, user.id, deviceSession.sessionId, input.deviceId, meta, deviceSession.canOwnPush);
+      const tokens = await createRefreshSession(client, user.id, deviceSession.sessionId, input.deviceId, meta,
+        deviceSession.canOwnPush, deviceSession.hasExistingInstallationProof ? input.refreshRecoveryVersion : undefined);
 
       return {
         user: {
@@ -473,6 +485,8 @@ export class AuthService {
   }
 
   async refresh(input: RefreshInput, meta: RequestMeta) {
+    const refreshHash = sha256(input.refreshToken);
+    const attempt = input.recovery && refreshRecoveryAttempt(input.recovery, refreshHash);
     let payload: Awaited<ReturnType<typeof tokenService.verifyRefreshToken>>;
     try {
       payload = await tokenService.verifyRefreshToken(input.refreshToken);
@@ -485,7 +499,15 @@ export class AuthService {
     if (payload.type !== 'refresh' || payload.did !== input.deviceId) {
       throw new AppError(401, 'Session expired, please login again.', 'DEVICE_MISMATCH');
     }
-    const refreshHash = sha256(input.refreshToken);
+
+    if (input.recovery && (payload.rrv !== 1 ||
+        !isRefreshRecoveryTarget({ userId: payload.sub, sessionId: payload.sid, deviceId: payload.did }))) {
+      throw recoveryUnavailable();
+    }
+    if (!input.recovery && payload.rrv === 1) {
+      // Never consume a negotiated recovery token through an unjournaled request.
+      throw new AppError(409, 'Secure sign-in recovery is required. Please try again.', 'REFRESH_RECOVERY_REQUIRED');
+    }
 
     const result = await withTransaction(async (client) => {
       await lockPushInstallation(client, input.deviceId);
@@ -498,9 +520,12 @@ export class AuthService {
         expires_at: string;
         revoked_at: string | null;
         replaced_by_token_id: string | null;
+        reuse_detected?: boolean;
+        recovery_attempt_digest?: string | null;
       }>(
         `
           select id, user_id, device_session_id, token_family_id, token_hash, expires_at, revoked_at, replaced_by_token_id
+            ${attempt ? ', reuse_detected, recovery_attempt_digest' : ''}
           from refresh_tokens
           where token_hash = $1
           for update
@@ -518,7 +543,14 @@ export class AuthService {
         throw new AppError(401, 'Session expired, please login again.', 'INVALID_REFRESH_TOKEN');
       }
 
+      const owner = { userId: payload.sub, sessionId: existing.device_session_id,
+        deviceId: input.deviceId, tokenFamilyId: existing.token_family_id };
+      if (input.recovery) await verifyRefreshRecoveryOwner(client, owner, input.recovery.installationCredential);
       if (existing.revoked_at || existing.replaced_by_token_id) {
+        if (attempt) {
+          const recovered = await recoverRefresh(client, owner, existing, attempt);
+          if (recovered) return recovered;
+        }
         await client.query(
           'update refresh_tokens set reuse_detected = true, revoked_at = coalesce(revoked_at, now()) where token_family_id = $1',
           [existing.token_family_id]
@@ -543,13 +575,13 @@ export class AuthService {
       }
 
       const replacementTokenId = crypto.randomUUID();
-      const replacementRefreshToken = await tokenService.signRefreshToken(
-        { userId: payload.sub, sessionId: existing.device_session_id, deviceId: session.device_id },
-        replacementTokenId,
-        existing.token_family_id
-      );
+      const issuedAt = Math.floor(Date.now() / 1000);
+      const expiresAt = issuedAt + env.REFRESH_TOKEN_TTL_DAYS * 86400;
+      const replacementRefreshToken = attempt
+        ? await signRecoverableRefresh(owner, replacementTokenId, attempt, issuedAt, expiresAt)
+        : await tokenService.signRefreshToken(owner, replacementTokenId, owner.tokenFamilyId);
       const replacementHash = sha256(replacementRefreshToken);
-      const replacementExpiresAt = new Date(Date.now() + env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
+      const replacementExpiresAt = new Date(attempt ? expiresAt * 1000 : Date.now() + env.REFRESH_TOKEN_TTL_DAYS * 86400000);
 
       await client.query(
         `
@@ -561,9 +593,9 @@ export class AuthService {
             token_hash,
             expires_at,
             created_by_ip,
-            user_agent
+            user_agent, issued_at
           )
-          values ($1, $2, $3, $4, $5, $6, $7::inet, $8)
+          values ($1, $2, $3, $4, $5, $6, $7::inet, $8, coalesce($9::timestamptz, now()))
         `,
         [
           replacementTokenId,
@@ -573,7 +605,8 @@ export class AuthService {
           replacementHash,
           replacementExpiresAt.toISOString(),
           meta.ip,
-          meta.userAgent
+          meta.userAgent,
+          attempt ? new Date(issuedAt * 1000).toISOString() : null
         ]
       );
 
@@ -581,10 +614,10 @@ export class AuthService {
         `
           update refresh_tokens
           set revoked_at = now(),
-              replaced_by_token_id = $2
+              replaced_by_token_id = $2${attempt ? ', recovery_attempt_digest = $3' : ''}
           where id = $1
         `,
-        [existing.id, replacementTokenId]
+        attempt ? [existing.id, replacementTokenId, attempt] : [existing.id, replacementTokenId]
       );
 
       await client.query(

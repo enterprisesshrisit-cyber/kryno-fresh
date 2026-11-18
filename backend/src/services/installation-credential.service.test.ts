@@ -46,14 +46,14 @@ test('knowing a device ID and an unrelated account password cannot claim an exis
 
 test('same original account may bootstrap proof, then a local account switch uses the existing proof', async () => {
   const f = fixture({ owner: 'account-A', otherSession: true });
-  assert.equal(await authorizePushLogin(f.client, 'account-A', 'fixture-device', proof), true);
-  assert.equal(await authorizePushLogin(f.client, 'account-B', 'fixture-device', proof), true);
+  assert.equal(await authorizePushLogin(f.client, 'account-A', 'fixture-device', proof), 'enrolled');
+  assert.equal(await authorizePushLogin(f.client, 'account-B', 'fixture-device', proof), 'verified');
   assert.equal(f.writes.length, 1);
 });
 
 test('legacy authentication never moves push authority; enrolled or scoped registration requires proof', async () => {
   const f = fixture({ hash: sha256(proof) });
-  assert.equal(await authorizePushLogin(f.client, 'account-B', 'fixture-device'), false);
+  assert.equal(await authorizePushLogin(f.client, 'account-B', 'fixture-device'), 'missing');
   await assert.rejects(requireInstallationProof(f.client, 'fixture-device'), AppError);
   const legacy = fixture();
   await requireInstallationProof(legacy.client, 'fixture-device');
