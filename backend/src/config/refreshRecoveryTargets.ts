@@ -7,10 +7,10 @@ const target = z.strictObject({
   deviceId: z.string().min(8).max(128).regex(/^[A-Za-z0-9_-]+$/)
 });
 
-export const refreshRecoveryTargetsSchema = z.string().max(1024).default('[]').transform((raw, ctx) => {
+export const installationTrialTargetsSchema = z.string().max(1024).default('[]').transform((raw, ctx) => {
   try { return JSON.parse(raw) as unknown; }
   catch {
-    ctx.addIssue({ code: 'custom', message: 'Refresh recovery targets must be a JSON array.' });
+    ctx.addIssue({ code: 'custom', message: 'Installation trial targets must be a JSON array.' });
     return z.NEVER;
   }
 }).pipe(z.array(target).max(2).refine(
@@ -18,3 +18,5 @@ export const refreshRecoveryTargetsSchema = z.string().max(1024).default('[]').t
     new Set(targets.map(value => value.deviceSessionId)).size === targets.length,
   'Each test installation and session must appear at most once.'
 ));
+
+export const refreshRecoveryTargetsSchema = installationTrialTargetsSchema;

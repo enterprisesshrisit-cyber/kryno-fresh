@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { refreshRecoveryTargetsSchema } from './refreshRecoveryTargets.js';
+import { installationTrialTargetsSchema, refreshRecoveryTargetsSchema } from './refreshRecoveryTargets.js';
 import { messageRelayWakeTargetsSchema } from './messageRelayWake.js';
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -30,6 +30,8 @@ const envSchema = z.object({
   AUTH_REFRESH_RECOVERY_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
   AUTH_REFRESH_RECOVERY_KEY: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   AUTH_REFRESH_RECOVERY_TARGETS: refreshRecoveryTargetsSchema,
+  AUTH_DURABLE_LOGOUT_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
+  AUTH_DURABLE_LOGOUT_TARGETS: installationTrialTargetsSchema,
   OTP_PEPPER: z.string().min(16).optional(),
   ACCESS_TOKEN_TTL_MINUTES: z.coerce.number().int().positive().default(15),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
@@ -100,6 +102,10 @@ const envSchema = z.object({
   if (env.AUTH_REFRESH_RECOVERY_ENABLED && !env.AUTH_REFRESH_RECOVERY_TARGETS.length) {
     ctx.addIssue({ code: 'custom', path: ['AUTH_REFRESH_RECOVERY_TARGETS'],
       message: 'Recoverable refresh requires an explicit test installation allowlist.' });
+  }
+  if (env.AUTH_DURABLE_LOGOUT_ENABLED && !env.AUTH_DURABLE_LOGOUT_TARGETS.length) {
+    ctx.addIssue({ code: 'custom', path: ['AUTH_DURABLE_LOGOUT_TARGETS'],
+      message: 'Durable sign-out requires an explicit test installation allowlist.' });
   }
   if (env.AUTH_REFRESH_RECOVERY_ENABLED &&
       (!env.AUTH_REFRESH_RECOVERY_KEY || env.AUTH_REFRESH_RECOVERY_KEY === env.JWT_REFRESH_SECRET ||

@@ -58,6 +58,12 @@ const recoverableRefreshSchema = z.strictObject({
   attempt_id: z.uuidv4()
 });
 
+const installationLogoutSchema = z.strictObject({
+  refresh_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+  device_id: z.string().min(8).max(128),
+  installation_credential: z.string().regex(/^[0-9a-f]{64}$/)
+});
+
 const logoutSchema = z.object({
   refresh_token: z.string().min(32).optional(),
   refreshToken: z.string().min(32).optional()
@@ -179,6 +185,19 @@ export async function logoutController(request: FastifyRequest, reply: FastifyRe
     refreshToken: body.refresh_token
   });
   return reply.code(200).send(result);
+}
+
+export async function installationLogoutController(request: FastifyRequest, reply: FastifyReply) {
+  reply.header('Cache-Control', 'no-store');
+  const parsed = installationLogoutSchema.safeParse(request.body);
+  if (!parsed.success) throw new AppError(400, 'Invalid sign-out confirmation request.', 'VALIDATION_ERROR');
+  const body = parsed.data;
+  await authService.logoutInstallation({
+    refreshFingerprint: body.refresh_fingerprint,
+    deviceId: body.device_id,
+    installationCredential: body.installation_credential
+  });
+  return reply.header('X-Kryno-Logout-Receipt', '1').code(204).send();
 }
 
 export async function resendVerificationController(request: FastifyRequest, reply: FastifyReply) {

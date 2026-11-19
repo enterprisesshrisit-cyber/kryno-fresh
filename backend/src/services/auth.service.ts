@@ -9,7 +9,7 @@ import { tokenService } from './token.service.js';
 import { generateOtpCode, hmacSha256, sha256 } from '../utils/crypto.js';
 import { SlidingWindowRateLimiter } from '../utils/security.js';
 import { activatePushOwner, lockPushInstallation, retirePushOwner } from './push-ownership.service.js';
-import { authorizePushLogin } from './installation-credential.service.js';
+import { authorizePushLogin, verifyExistingInstallationProof } from './installation-credential.service.js';
 import {
   isRefreshRecoveryTarget, recoverRefresh, recoveryUnavailable, refreshRecoveryAttempt,
   signRecoverableRefresh, verifyRefreshRecoveryOwner, type RefreshRecoveryInput
@@ -49,6 +49,39 @@ type RefreshInput = {
 type LogoutInput = {
   refreshToken: string;
 };
+
+type InstallationLogoutInput = {
+  refreshFingerprint: string;
+  deviceId: string;
+  installationCredential: string;
+};
+
+type LogoutFamily = {
+  user_id: string;
+  device_session_id: string;
+  token_family_id: string;
+  device_id: string;
+};
+
+async function findLogoutFamily(client: pg.PoolClient, fingerprint: string, deviceId: string | null) {
+  const result = await client.query<LogoutFamily>(`
+    select r.user_id, r.device_session_id, r.token_family_id, d.device_id
+    from refresh_tokens r join device_sessions d on d.id = r.device_session_id and d.user_id = r.user_id
+    where r.token_hash = $1 and ($2::text is null or d.device_id = $2)`, [fingerprint, deviceId]);
+  return result.rows[0];
+}
+
+async function revokeLogoutFamily(client: pg.PoolClient, family: LogoutFamily) {
+  // A concurrent refresh may have rotated the token. Revoke its family only.
+  await client.query(`update refresh_tokens set revoked_at = coalesce(revoked_at, now())
+    where user_id = $1 and device_session_id = $2 and token_family_id = $3`,
+  [family.user_id, family.device_session_id, family.token_family_id]);
+  await retirePushOwner(client, family.device_session_id, family.device_id, family.token_family_id);
+}
+
+function unverifiedInstallationLogout() {
+  return new AppError(403, 'Could not verify this sign-out.', 'INSTALLATION_LOGOUT_UNVERIFIED');
+}
 
 type ResendVerificationInput = {
   email: string;
@@ -652,27 +685,11 @@ export class AuthService {
   }
 
   async logout(input: LogoutInput) {
-    const refreshHash = sha256(input.refreshToken);
-
     const retired = await withTransaction(async (client) => {
-      const result = await client.query<{
-        user_id: string; device_session_id: string; token_family_id: string; device_id: string;
-      }>(
-        `select r.user_id, r.device_session_id, r.token_family_id, d.device_id
-         from refresh_tokens r join device_sessions d on d.id = r.device_session_id
-         where r.token_hash = $1`,
-        [refreshHash]
-      );
-
-      const session = result.rows[0];
+      const session = await findLogoutFamily(client, sha256(input.refreshToken), null);
       if (session) {
         await lockPushInstallation(client, session.device_id);
-        // A refresh may have rotated while logout was in flight. Revoke the login
-        // family, not just its obsolete token; a later login family is untouched.
-        await client.query(`update refresh_tokens set revoked_at = coalesce(revoked_at, now())
-          where user_id = $1 and device_session_id = $2 and token_family_id = $3`,
-        [session.user_id, session.device_session_id, session.token_family_id]);
-        await retirePushOwner(client, session.device_session_id, session.device_id, session.token_family_id);
+        await revokeLogoutFamily(client, session);
       }
       return session;
     });
@@ -681,6 +698,31 @@ export class AuthService {
     if (retired) relayService.revokeLoginFamily(retired.device_session_id, retired.token_family_id);
 
     return { success: true };
+  }
+
+  async logoutInstallation(input: InstallationLogoutInput) {
+    if (!env.AUTH_DURABLE_LOGOUT_ENABLED) {
+      throw new AppError(503, 'Sign-out confirmation is temporarily unavailable.', 'INSTALLATION_LOGOUT_UNAVAILABLE');
+    }
+    const target = env.AUTH_DURABLE_LOGOUT_TARGETS.find(entry => entry.deviceId === input.deviceId);
+    if (!target) throw unverifiedInstallationLogout();
+    const retired = await withTransaction(async client => {
+      await lockPushInstallation(client, input.deviceId);
+      try {
+        // Revocation must never enroll a proof or change the installation owner.
+        await verifyExistingInstallationProof(client, input.deviceId, input.installationCredential);
+      } catch (error) {
+        if (error instanceof AppError && error.code === 'INSTALLATION_PROOF_MISMATCH') throw unverifiedInstallationLogout();
+        throw error;
+      }
+      const family = await findLogoutFamily(client, input.refreshFingerprint, input.deviceId);
+      if (!family || family.user_id !== target.userId || family.device_session_id !== target.deviceSessionId) {
+        throw unverifiedInstallationLogout();
+      }
+      await revokeLogoutFamily(client, family);
+      return family;
+    });
+    relayService.revokeLoginFamily(retired.device_session_id, retired.token_family_id);
   }
 
   async resendVerification(input: ResendVerificationInput) {

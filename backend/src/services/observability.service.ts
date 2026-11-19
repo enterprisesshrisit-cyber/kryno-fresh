@@ -7,6 +7,10 @@ const SENSITIVE_KEYS = [
   'password',
   'new_password',
   'refresh_token',
+  'refresh_fingerprint',
+  'refreshFingerprint',
+  'installation_credential',
+  'installationCredential',
   'accessToken',
   'refreshToken',
   'code',
@@ -53,6 +57,14 @@ export function initObservability() {
     tracesSampleRate: env.APP_ENV === 'production' ? 0.1 : 0,
     sendDefaultPii: false,
     beforeSend(event) {
+      if (event.request?.url) {
+        try {
+          if (new URL(event.request.url, 'http://localhost').pathname === '/api/auth/logout/installation') {
+            // The SDK may hold a serialized body, not a recursively redactable object.
+            delete event.request.data;
+          }
+        } catch { /* An invalid diagnostic URL is not request authority. */ }
+      }
       event.request = scrubSensitiveData(event.request) as typeof event.request;
       event.contexts = scrubSensitiveData(event.contexts) as typeof event.contexts;
       event.extra = scrubSensitiveData(event.extra) as typeof event.extra;

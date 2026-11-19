@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import {
+  installationLogoutController,
   loginController,
   logoutController,
   recoverableRefreshController,
@@ -21,4 +22,5 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/refresh', refreshController);
   app.post('/refresh/recoverable', recoverableRefreshController);
   app.post('/logout', logoutController);
+  app.post('/logout/installation', { bodyLimit: 2048 }, installationLogoutController);
 }
